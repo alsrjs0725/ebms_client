@@ -108,6 +108,8 @@ beatoraja가 파일을 읽는 시점은 두 가지다.
 
 ## 7. 서버에 필요한 변경 (필수)
 
+이슈: [#6 매니페스트](https://github.com/alsrjs0725/ebms_server/issues/6) · [#7 Range·song_id·해시](https://github.com/alsrjs0725/ebms_server/issues/7) · [#8 청크 파일명 충돌](https://github.com/alsrjs0725/ebms_server/issues/8)
+
 가상 트리를 만들려면 **곡마다 파일 목록**이 필요한데, 지금 서버는 이를 주지 않는다.
 
 | 필요 | 이유 | 제안 |
