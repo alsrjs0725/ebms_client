@@ -1,0 +1,299 @@
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
+use std::sync::Mutex;
+
+use rusqlite::{Connection, OptionalExtension, params};
+
+use crate::Result;
+use crate::manifest::SongManifest;
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS chunk(
+    kind TEXT NOT NULL,          -- 'chart' | 'manifest'
+    id INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    PRIMARY KEY (kind, id)
+);
+CREATE TABLE IF NOT EXISTS chart(
+    sha256 TEXT PRIMARY KEY,
+    ext TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    crc32 INTEGER NOT NULL,
+    chunk_id INTEGER NOT NULL,
+    data_offset INTEGER NOT NULL  -- 청크 zip(무압축) 안 데이터 시작 위치
+);
+CREATE INDEX IF NOT EXISTS chart_chunk ON chart(chunk_id);
+CREATE TABLE IF NOT EXISTS song(
+    id INTEGER PRIMARY KEY,
+    manifest_chunk INTEGER NOT NULL,
+    manifest TEXT NOT NULL        -- SongManifest JSON
+);
+CREATE INDEX IF NOT EXISTS song_manifest ON song(manifest_chunk);
+CREATE TABLE IF NOT EXISTS cache_entry(
+    song_id INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    last_access INTEGER NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (song_id, path)
+);
+";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkKind {
+    Chart,
+    Manifest,
+}
+
+impl ChunkKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            ChunkKind::Chart => "chart",
+            ChunkKind::Manifest => "manifest",
+        }
+    }
+}
+
+/// 청크 zip 안의 차트 하나.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChartRow {
+    pub sha256: String,
+    pub ext: String,
+    pub size: u64,
+    pub crc32: u32,
+    pub chunk_id: u32,
+    pub data_offset: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct CacheRow {
+    pub song_id: u32,
+    pub path: String,
+    pub size: u64,
+    pub last_access: i64,
+    pub pinned: bool,
+}
+
+/// 로컬 SQLite 인덱스.
+pub struct Index {
+    con: Mutex<Connection>,
+}
+
+impl Index {
+    pub fn open(path: &Path) -> Result<Self> {
+        let con = Connection::open(path)?;
+        con.pragma_update(None, "journal_mode", "WAL")?;
+        con.pragma_update(None, "synchronous", "NORMAL")?;
+        con.execute_batch(SCHEMA)?;
+        Ok(Self {
+            con: Mutex::new(con),
+        })
+    }
+
+    fn con(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.con.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn chunk_hashes(&self, kind: ChunkKind) -> Result<BTreeMap<u32, String>> {
+        let con = self.con();
+        let mut stmt = con.prepare("SELECT id, sha256 FROM chunk WHERE kind = ?1")?;
+        let rows = stmt.query_map([kind.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 차트 청크 하나의 차트 목록과 해시를 한 트랜잭션으로 바꾼다.
+    pub fn replace_chart_chunk(
+        &self,
+        chunk_id: u32,
+        sha256: &str,
+        charts: &[ChartRow],
+    ) -> Result<()> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        tx.execute("DELETE FROM chart WHERE chunk_id = ?1", [chunk_id])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO chart (sha256, ext, size, crc32, chunk_id, data_offset)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for c in charts {
+                stmt.execute(params![
+                    c.sha256,
+                    c.ext,
+                    c.size as i64,
+                    c.crc32,
+                    c.chunk_id,
+                    c.data_offset as i64
+                ])?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO chunk (kind, id, sha256) VALUES ('chart', ?1, ?2)",
+            params![chunk_id, sha256],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_chart_chunk(&self, chunk_id: u32) -> Result<()> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        tx.execute("DELETE FROM chart WHERE chunk_id = ?1", [chunk_id])?;
+        tx.execute(
+            "DELETE FROM chunk WHERE kind = 'chart' AND id = ?1",
+            [chunk_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 매니페스트 청크 하나의 곡 목록과 해시를 한 트랜잭션으로 바꾼다.
+    pub fn replace_manifest_chunk(
+        &self,
+        chunk_id: u32,
+        sha256: &str,
+        songs: &[SongManifest],
+    ) -> Result<()> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        tx.execute("DELETE FROM song WHERE manifest_chunk = ?1", [chunk_id])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO song (id, manifest_chunk, manifest) VALUES (?1, ?2, ?3)",
+            )?;
+            for s in songs {
+                stmt.execute(params![s.song_id, chunk_id, serde_json::to_string(s)?])?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO chunk (kind, id, sha256) VALUES ('manifest', ?1, ?2)",
+            params![chunk_id, sha256],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_manifest_chunk(&self, chunk_id: u32) -> Result<()> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        tx.execute("DELETE FROM song WHERE manifest_chunk = ?1", [chunk_id])?;
+        tx.execute(
+            "DELETE FROM chunk WHERE kind = 'manifest' AND id = ?1",
+            [chunk_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn songs(&self) -> Result<Vec<SongManifest>> {
+        let con = self.con();
+        let mut stmt = con.prepare("SELECT manifest FROM song ORDER BY id")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for json in rows {
+            out.push(serde_json::from_str(&json?)?);
+        }
+        Ok(out)
+    }
+
+    pub fn charts(&self) -> Result<HashMap<String, ChartRow>> {
+        let con = self.con();
+        let mut stmt =
+            con.prepare("SELECT sha256, ext, size, crc32, chunk_id, data_offset FROM chart")?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ChartRow {
+                sha256: r.get(0)?,
+                ext: r.get(1)?,
+                size: r.get::<_, i64>(2)? as u64,
+                crc32: r.get(3)?,
+                chunk_id: r.get(4)?,
+                data_offset: r.get::<_, i64>(5)? as u64,
+            })
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let row = row?;
+            out.insert(row.sha256.clone(), row);
+        }
+        Ok(out)
+    }
+
+    pub fn cache_get(&self, song_id: u32, path: &str) -> Result<Option<CacheRow>> {
+        let con = self.con();
+        Ok(con
+            .query_row(
+                "SELECT size, last_access, pinned FROM cache_entry WHERE song_id = ?1 AND path = ?2",
+                params![song_id, path],
+                |r| {
+                    Ok(CacheRow {
+                        song_id,
+                        path: path.to_string(),
+                        size: r.get::<_, i64>(0)? as u64,
+                        last_access: r.get(1)?,
+                        pinned: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn cache_put(&self, song_id: u32, path: &str, size: u64, now: i64) -> Result<()> {
+        self.con().execute(
+            "INSERT INTO cache_entry (song_id, path, size, last_access) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(song_id, path) DO UPDATE SET size = excluded.size, last_access = excluded.last_access",
+            params![song_id, path, size as i64, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn cache_touch(&self, song_id: u32, path: &str, now: i64) -> Result<()> {
+        self.con().execute(
+            "UPDATE cache_entry SET last_access = ?3 WHERE song_id = ?1 AND path = ?2",
+            params![song_id, path, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn cache_remove(&self, song_id: u32, path: &str) -> Result<()> {
+        self.con().execute(
+            "DELETE FROM cache_entry WHERE song_id = ?1 AND path = ?2",
+            params![song_id, path],
+        )?;
+        Ok(())
+    }
+
+    pub fn cache_set_pinned(&self, song_id: u32, pinned: bool) -> Result<()> {
+        self.con().execute(
+            "UPDATE cache_entry SET pinned = ?2 WHERE song_id = ?1",
+            params![song_id, pinned],
+        )?;
+        Ok(())
+    }
+
+    pub fn cache_total(&self) -> Result<u64> {
+        Ok(self
+            .con()
+            .query_row("SELECT COALESCE(SUM(size), 0) FROM cache_entry", [], |r| {
+                r.get::<_, i64>(0)
+            })? as u64)
+    }
+
+    /// 고정되지 않은 항목을 오래된 순으로.
+    pub fn cache_eviction_candidates(&self, limit: usize) -> Result<Vec<CacheRow>> {
+        let con = self.con();
+        let mut stmt = con.prepare(
+            "SELECT song_id, path, size, last_access, pinned FROM cache_entry
+             WHERE pinned = 0 ORDER BY last_access LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| {
+            Ok(CacheRow {
+                song_id: r.get(0)?,
+                path: r.get(1)?,
+                size: r.get::<_, i64>(2)? as u64,
+                last_access: r.get(3)?,
+                pinned: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+}
