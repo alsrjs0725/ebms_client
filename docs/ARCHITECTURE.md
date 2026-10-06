@@ -109,24 +109,15 @@ beatoraja가 파일을 읽는 시점은 두 가지다.
 
 다운로드 진행은 따로 표시하지 않는다. 구동기 입장에서는 파일 읽기가 조금 오래 걸리는 것으로 보일 뿐이다.
 
-## 7. 서버에 필요한 변경 (필수)
+## 7. 서버에 필요한 변경
 
 > 서버에 반영이 끝난 항목은 이 절에서 삭제한다. 남아 있는 항목은 아직 반영되지 않은 것이다.
 
-이슈: [#6 매니페스트](https://github.com/alsrjs0725/ebms_server/issues/6) · [#7 Range·song_id·해시](https://github.com/alsrjs0725/ebms_server/issues/7) · [#8 청크 파일명 충돌](https://github.com/alsrjs0725/ebms_server/issues/8)
-
-가상 트리를 만들려면 **곡마다 파일 목록**이 필요한데, 지금 서버는 이를 주지 않는다.
-
-| 필요 | 이유 | 제안 |
+| 필요 | 이유 | 이슈 |
 | --- | --- | --- |
-| **곡 매니페스트** | 폴더·파일명·크기 트리를 다운로드 없이 표시 | 차트 청크처럼 청크 단위로 제공: `GET /api/manifest/hash`, `GET /api/manifest/{chunk_id}`. 내용: song_id, 폴더명, 차트 sha256 목록, 파일별 `path, size, zip 내 offset, 압축 크기, crc32` |
-| **Range 지원** | 파일 단위 다운로드 | `/api/files/song/...`에 `Range`/`206` 지원. DB는 이미 `SUBSTRING`으로 부분 읽기 중이라 구현 쉬움 |
-| **song_id로 다운로드** | 매니페스트가 song_id 기준 | `GET /api/files/song/id/{song_id}` |
-| 곡 zip 해시 노출 | 전체 다운로드 검증 | 응답 헤더 `X-Content-SHA256` (`song.sha256` 이미 있음) |
-| 청크 내 파일명 충돌 | 다른 곡의 같은 이름(`_7a.bme`) 충돌 | 청크 arcname을 `{sha256}{ext}`로. 원래 이름은 매니페스트에 |
-| API 버전 | 호환성 | `/api/version` |
+| 매니페스트에 차트 sha256 ↔ 경로 매핑 | 가상 폴더의 차트 파일을 로컬 청크와 연결. 나중에 기존 곡에 연결된 차트는 원래 파일명이 없음 | [#10](https://github.com/alsrjs0725/ebms_server/issues/10) |
 
-매니페스트는 곡을 넣을 때(`insert_song`) zip을 만들며 함께 계산해 DB에 저장하면 된다.
+임시 우회: 매니페스트 `files`의 (size, crc32)를 청크 zip 항목과 맞춰 매핑하고, 맞지 않는 차트는 `{sha256}{ext}` 이름으로 보여준다.
 
 ## 8. 저장소 구조
 
@@ -173,9 +164,8 @@ ebms_client/
 
 ## 11. 구현 순서
 
-1. **PoC**: Windows WinFsp에 고정 트리를 마운트하고 beatoraja가 곡 인식·플레이하는지 확인 (가장 큰 위험 요소)
-2. 서버: 매니페스트, Range, song_id 다운로드 추가
-3. core: api + sync + tree + 차트 읽기 → 다운로드 없이 목록·차트까지 동작
-4. fetcher + cache: 파일 단위/곡 단위 다운로드
-5. 설정 창, 자동 시작, 설치기(WinFsp 포함)
-6. Linux FUSE, 이후 macOS 검토
+1. core: api + sync + index + tree + fetcher + cache, CLI로 검증 (서버 반영 완료로 바로 시작)
+2. Linux FUSE 백엔드: 같은 코어를 실제 마운트로 검증
+3. **Windows WinFsp 백엔드 + beatoraja 확인** (가장 큰 위험 요소. Windows 실기 필요)
+4. 상주 프로세스, 설정 창, 자동 시작, 설치기(WinFsp 포함)
+5. macOS 검토

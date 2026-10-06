@@ -1,0 +1,11 @@
+[package]
+name = "ebms-vfs-fuse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ebms-core = { path = "../ebms-core" }
+fuser = { version = "0.18", default-features = false }
+libc = "0.2"
+tracing.workspace = true
