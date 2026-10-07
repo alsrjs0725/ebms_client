@@ -311,7 +311,7 @@ pub fn song_dir_name(song_id: u32, folder: &str) -> String {
     }
 }
 
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     let mut s: String = name
         .chars()
         .map(|c| {

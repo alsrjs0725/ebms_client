@@ -10,15 +10,19 @@
 //! - [`fetch`]: 요청 시 다운로드 (사전 파일은 파일 하나, 플레이 파일은 곡 zip 전체)
 //! - [`cache`]: 받은 에셋 캐시
 //! - [`fs`]: OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템
+//! - [`drive`]: 여러 서버를 서버별 최상위 폴더로 합친 가상 드라이브
+//! - [`hub`]: 등록된 서버 전체 (추가·삭제, 로그인, 동기화). 상주 앱이 쓴다
 
 pub mod api;
 pub mod auth;
 pub mod cache;
 pub mod client;
 pub mod config;
+pub mod drive;
 pub mod error;
 pub mod fetch;
 pub mod fs;
+pub mod hub;
 pub mod index;
 pub mod manifest;
 pub mod paths;

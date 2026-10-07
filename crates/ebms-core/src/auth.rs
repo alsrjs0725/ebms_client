@@ -30,6 +30,23 @@ const DONE_HTML: &str = "<!doctype html><meta charset=utf-8><title>EBMS</title>\
 const FAIL_HTML: &str = "<!doctype html><meta charset=utf-8><title>EBMS</title>\
 <p>로그인하지 못했습니다. 클라이언트에서 다시 시도해 주세요.</p>";
 
+/// 서버의 기기 목록에 보일 이름. `{app} ({호스트 이름})`.
+pub fn device_name(app: &str) -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty());
+    match host {
+        Some(h) => format!("{app} ({h})"),
+        None => app.to_string(),
+    }
+}
+
 /// PKCE 값 한 쌍.
 pub struct Pkce {
     pub verifier: String,

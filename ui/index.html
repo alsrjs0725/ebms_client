@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EBMS 설정</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>EBMS 설정</h1>
+    <p id="message" class="message" hidden></p>
+
+    <section>
+      <h2>서버</h2>
+      <p id="empty" class="muted" hidden>아직 추가한 서버가 없습니다. 아래에서 서버 주소를 넣어 주세요.</p>
+      <ul id="servers" class="servers"></ul>
+
+      <form id="add-form" class="add">
+        <input id="add-url" type="url" placeholder="서버 주소 (https://…)" required>
+        <input id="add-name" type="text" placeholder="이름 (선택)">
+        <button type="submit">서버 추가</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>가상 드라이브</h2>
+      <p id="drive-status" class="muted"></p>
+      <form id="drive-form" class="add">
+        <input id="drive-path" type="text" placeholder="마운트 위치 (예: /home/me/ebms)">
+        <button type="submit">위치 변경</button>
+      </form>
+      <p class="muted">서버마다 폴더 하나로 보입니다. 구동기(beatoraja 등)의 곡 폴더에 이 위치를 등록하세요.</p>
+    </section>
+
+    <footer>
+      <button id="quit" class="secondary">EBMS 종료</button>
+    </footer>
+  </main>
+
+  <template id="server-template">
+    <li class="server">
+      <div class="head">
+        <div>
+          <strong class="name"></strong>
+          <span class="badge"></span>
+        </div>
+        <span class="url muted"></span>
+      </div>
+      <dl class="account"></dl>
+      <p class="sync muted"></p>
+      <div class="actions">
+        <button class="login">로그인</button>
+        <button class="logout secondary">로그아웃</button>
+        <button class="account-link secondary">다른 계정 연결</button>
+        <button class="sync-now secondary">지금 동기화</button>
+        <button class="remove danger">삭제</button>
+      </div>
+    </li>
+  </template>
+</body>
+</html>

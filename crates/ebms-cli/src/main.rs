@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use ebms_core::api::Api;
 use ebms_core::auth::LoginRequest;
 use ebms_core::config::{AppDir, Config, ServerEntry};
-use ebms_core::fs::Kind;
+use ebms_core::fs::{Kind, ReadOnlyFs};
 use ebms_core::session::SessionStore;
 use ebms_core::{Client, Error, Options};
 
@@ -61,7 +61,8 @@ enum Cmd {
     Cat { path: String },
     /// 상태 요약
     Status,
-    /// 가상 드라이브로 마운트하고 주기적으로 동기화 (Ctrl-C로 종료)
+    /// 가상 드라이브로 마운트하고 주기적으로 동기화 (Ctrl-C로 종료).
+    /// 서버마다 최상위 폴더 하나. --server를 주면 그 서버만
     #[cfg(target_os = "linux")]
     Mount {
         mountpoint: PathBuf,
@@ -144,7 +145,8 @@ fn main() -> anyhow::Result<()> {
         } => {
             let server = app.server(sel)?;
             let api = Api::new(&server.url)?;
-            let device_name = device_name.unwrap_or_else(default_device_name);
+            let device_name =
+                device_name.unwrap_or_else(|| ebms_core::auth::device_name("ebms-cli"));
             let req = rt.block_on(LoginRequest::start(&api, &device_name))?;
             eprintln!("Log in with your browser:\n{}", req.url());
             if !no_browser && let Err(e) = open::that_detached(req.url()) {
@@ -232,8 +234,12 @@ fn main() -> anyhow::Result<()> {
             mountpoint,
             sync_minutes,
         } => {
-            let client = app.client(&app.server(sel)?)?;
-            mount(&rt, client, &mountpoint, sync_minutes)?
+            let only = match sel {
+                Some(_) => Some(app.server(sel)?.id),
+                None => None,
+            };
+            let hub = ebms_core::hub::Hub::open(app.dir, app.use_keyring, rt.handle().clone())?;
+            mount(&rt, hub, only, &mountpoint, sync_minutes)?
         }
     }
     Ok(())
@@ -346,22 +352,6 @@ fn login_hint(e: Error) -> anyhow::Error {
     }
 }
 
-fn default_device_name() -> String {
-    let host = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-        })
-        .filter(|s| !s.is_empty());
-    match host {
-        Some(h) => format!("ebms-cli ({h})"),
-        None => "ebms-cli".into(),
-    }
-}
-
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -387,38 +377,35 @@ fn human_bytes(n: u64) -> String {
 #[cfg(target_os = "linux")]
 fn mount(
     rt: &tokio::runtime::Runtime,
-    client: Client,
+    hub: ebms_core::hub::Hub,
+    only: Option<String>,
     mountpoint: &std::path::Path,
     sync_minutes: u64,
 ) -> anyhow::Result<()> {
-    use std::sync::Arc;
     use std::time::Duration;
 
-    // 서버에 연결되지 않아도 로컬 인덱스로 마운트한다.
-    if let Err(e) = rt.block_on(client.sync()) {
-        tracing::warn!(%e, "initial sync failed, using local index");
+    let drive = hub.drive();
+    if let Some(only) = &only {
+        for id in drive.ids().into_iter().filter(|id| id != only) {
+            drive.remove(&id);
+        }
     }
-    let fs = Arc::new(client.fs(rt.handle().clone())?);
-    let _session = ebms_vfs_fuse::spawn_mount(fs.clone(), mountpoint)
+    if drive.ids().is_empty() {
+        bail!("no server added yet (ebms server add <url>)");
+    }
+    // 서버에 연결되지 않아도 로컬 인덱스로 마운트한다.
+    rt.block_on(hub.sync_all());
+    let _session = ebms_vfs_fuse::spawn_mount(drive, mountpoint)
         .with_context(|| format!("mount {}", mountpoint.display()))?;
     tracing::info!(mountpoint = %mountpoint.display(), "mounted");
 
-    let client = Arc::new(client);
     rt.block_on(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(sync_minutes.max(1) * 60));
         tick.tick().await;
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => break,
-                _ = tick.tick() => match client.sync().await {
-                    Ok(r) if r.changed() => {
-                        if let Err(e) = fs.reload() {
-                            tracing::warn!(%e, "reload failed");
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(%e, "sync failed"),
-                },
+                _ = tick.tick() => hub.sync_all().await,
             }
         }
     });

@@ -17,10 +17,11 @@
 
 ```
 E:\ (또는 ~/ebms 마운트 지점)
-└─ 00123 Artist - Title\
-   ├─ _7a.bme        ← 로컬 차트, 즉시 읽힘
-   ├─ bgm01.ogg      ← 크기·이름만 보임, 열면 다운로드
-   └─ stagefile.png
+└─ <서버 이름>\          ← 로그인한 EBMS 서버마다 하나
+   └─ 00123 Artist - Title\
+      ├─ _7a.bme        ← 로컬 차트, 즉시 읽힘
+      ├─ bgm01.ogg      ← 크기·이름만 보임, 열면 다운로드
+      └─ stagefile.png
 ```
 
 ## 2. 요구사항
@@ -56,7 +57,7 @@ E:\ (또는 ~/ebms 마운트 지점)
 | 설정/직렬화 | `serde`, `toml` |
 | 로그/에러 | `tracing`, `thiserror` |
 | 앱 | Tauri 플러그인 `single-instance`, `autostart`, `updater`(조용히 적용), `dialog` |
-| UI | 설정 창 하나뿐이라 프레임워크 없이 TypeScript + Vite, 최소 CSS |
+| UI | 설정 창 하나뿐이라 프레임워크·빌드 단계 없이 HTML + JS, 최소 CSS |
 
 웹뷰는 설정 창을 열 때만 만들고 닫으면 해제한다. 평소에는 Rust 프로세스 하나만 돈다.
 
@@ -118,7 +119,22 @@ beatoraja가 파일을 읽는 시점은 두 가지다.
 - 로그인: `127.0.0.1` 빈 포트에서 수신을 열고 브라우저로 `/auth/client/authorize`를 연다(PKCE `S256`). 서버가 1회용 `code`를 붙여 루프백으로 돌려보내면 `state`를 확인하고 `code` + `code_verifier`를 `/api/auth/client/token`에 보내 세션키를 받는다.
 - 세션키는 OS 키체인(`keyring`)에 서버 주소별로 저장한다. 키체인을 못 쓰면 서버 데이터 폴더의 `session` 파일(권한 600).
 - 모든 API 요청에 `Authorization: Bearer <세션키>`. `401`을 받으면 조용히 로그아웃 상태로 바꾸고(`Api::needs_login`) 설정 창에만 "다시 로그인 필요"를 보여준다.
-- CLI: `ebms server add|list|remove`, `ebms login|logout|whoami`, 나머지 명령은 `--server`로 대상을 고른다(서버가 하나면 생략).
+- CLI: `ebms server add|list|remove`, `ebms login|logout|whoami`, 나머지 명령은 `--server`로 대상을 고른다(서버가 하나면 생략). `mount`는 `--server`가 없으면 모든 서버를 마운트한다.
+- 가상 드라이브는 서버별 최상위 폴더로 합친다(`drive::Drive`): `E:\<서버 이름>\00123 Artist - Title\`. 같은 곡이 여러 서버에 있어도 합치지 않는다. 한 서버의 세션이 만료되거나 서버가 꺼져도 다른 서버는 그대로이고, 받아 둔 파일은 계속 읽힌다.
+- 상주 앱은 `hub::Hub`로 서버 전체를 관리한다(추가·삭제, 로그인, 서버별 동기화와 상태).
+
+### 설정 창
+
+| 항목 | 내용 |
+| --- | --- |
+| 서버 | 추가(주소, 이름 선택, `/api/version` 확인) · 삭제(로그아웃 후 목록과 드라이브에서 뺌, 로컬 데이터는 남김) |
+| 로그인 | 서버별 로그인/로그아웃 버튼. 상태: 로그인됨 · 다시 로그인 필요(401) · 로그아웃 상태 |
+| 계정 | `/api/me`: 이름, 로그인 수단(Google, Discord), 플레이 티켓, 이번 달 사전 다운로드 사용량·감속 여부 |
+| 다른 계정 연결 | 브라우저로 서버의 `/account`를 연다 |
+| 동기화 | 마지막 동기화 시각 또는 오류, "지금 동기화" |
+| 가상 드라이브 | 마운트 위치와 상태 |
+
+화면은 빌드 단계 없는 HTML·JS(`ui/`)다. 설정 창 하나뿐이라 TypeScript·Vite를 쓰지 않고 Node 없이 빌드되게 했다.
 
 ## 8. 서버에 필요한 변경
 
@@ -140,8 +156,8 @@ ebms_client/
 │  ├─ ebms-vfs-winfsp/        # Windows 백엔드
 │  ├─ ebms-vfs-fuse/          # Linux/macOS 백엔드
 │  └─ ebms-cli/
-├─ src-tauri/                 # 상주 프로세스 + 설정 창
-├─ ui/                        # 설정 창 (TS)
+├─ src-tauri/                 # 상주 프로세스 + 설정 창 (ebms-app)
+├─ ui/                        # 설정 창 (HTML·JS, 빌드 단계 없음)
 ├─ docs/
 └─ .github/workflows/
 ```
@@ -150,7 +166,7 @@ ebms_client/
 
 ```
 <앱 데이터>/
-├─ config.toml                 # 서버 목록
+├─ config.toml                 # 서버 목록, 마운트 위치
 └─ servers/<server_id>/
    ├─ index.sqlite             # chunk, chart, song, song_file, cache_entry
    ├─ charts/                  # 청크 zip 원본 (가상 FS가 차트를 여기서 읽음)
@@ -180,5 +196,5 @@ ebms_client/
 1. core: api + sync + index + tree + fetcher + cache, CLI로 검증 (서버 반영 완료로 바로 시작)
 2. Linux FUSE 백엔드: 같은 코어를 실제 마운트로 검증
 3. **Windows WinFsp 백엔드 + beatoraja 확인** (가장 큰 위험 요소. Windows 실기 필요)
-4. 상주 프로세스, 설정 창, 자동 시작, 설치기(WinFsp 포함)
+4. 상주 프로세스, 설정 창 (완료: Linux 마운트, 서버·로그인 관리) / 남음: 자동 시작, 설치기(WinFsp 포함)
 5. macOS 검토

@@ -1,4 +1,5 @@
-//! Linux FUSE 백엔드 (macOS는 추후 검토). [`ebms_core::fs::EbmsFs`]를 읽기 전용으로 마운트한다.
+//! Linux FUSE 백엔드 (macOS는 추후 검토). [`ebms_core::fs::ReadOnlyFs`]를 읽기 전용으로 마운트한다.
+//! 보통 서버별 최상위 폴더로 합친 [`ebms_core::drive::Drive`]를 마운트한다.
 #![cfg(target_os = "linux")]
 
 use std::ffi::OsStr;
@@ -6,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use ebms_core::fs::{Attr, EbmsFs, Kind};
+use ebms_core::fs::{Attr, Kind, ReadOnlyFs};
 use fuser::{
     Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, INodeNo, IoctlFlags,
     LockOwner, MountOption, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
@@ -20,7 +21,7 @@ pub use fuser::BackgroundSession;
 const TTL: Duration = Duration::from_secs(60);
 
 struct FuseFs {
-    fs: Arc<EbmsFs>,
+    fs: Arc<dyn ReadOnlyFs>,
     uid: u32,
     gid: u32,
 }
@@ -161,8 +162,33 @@ impl Filesystem for FuseFs {
     }
 }
 
+/// 이전 프로세스가 언마운트하지 못하고 죽어 남은 마운트(`ENOTCONN`)를 걷어낸다.
+fn clear_stale(mountpoint: &Path) {
+    let stale = matches!(
+        std::fs::metadata(mountpoint),
+        Err(e) if e.raw_os_error() == Some(libc::ENOTCONN)
+    );
+    if !stale {
+        return;
+    }
+    warn!(mountpoint = %mountpoint.display(), "stale mount, unmounting");
+    for cmd in ["fusermount3", "fusermount"] {
+        let status = std::process::Command::new(cmd)
+            .arg("-uz")
+            .arg(mountpoint)
+            .status();
+        if matches!(status, Ok(s) if s.success()) {
+            return;
+        }
+    }
+}
+
 /// 백그라운드 스레드에서 마운트한다. 반환값을 drop하면 언마운트된다.
-pub fn spawn_mount(fs: Arc<EbmsFs>, mountpoint: &Path) -> std::io::Result<BackgroundSession> {
+/// 마운트 위치 폴더가 없으면 만든다.
+pub fn spawn_mount(
+    fs: Arc<dyn ReadOnlyFs>,
+    mountpoint: &Path,
+) -> std::io::Result<BackgroundSession> {
     let mut config = Config::default();
     config.mount_options = vec![
         MountOption::RO,
@@ -172,6 +198,8 @@ pub fn spawn_mount(fs: Arc<EbmsFs>, mountpoint: &Path) -> std::io::Result<Backgr
         MountOption::NoExec,
     ];
     config.acl = SessionACL::Owner;
+    clear_stale(mountpoint);
+    std::fs::create_dir_all(mountpoint)?;
     // 다운로드를 기다리는 읽기가 다른 요청을 막지 않도록 여러 스레드로.
     config.n_threads = Some(8);
     // SAFETY: getuid/getgid는 실패하지 않는다.

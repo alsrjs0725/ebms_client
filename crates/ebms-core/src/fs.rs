@@ -11,7 +11,7 @@ use tokio::runtime::Handle;
 use crate::fetch::Fetcher;
 use crate::index::Index;
 use crate::paths::Paths;
-use crate::tree::{Ino, Node, Source, Tree};
+use crate::tree::{Ino, Node, ROOT, Source, Tree};
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,26 @@ pub struct DirEntry {
     pub ino: Ino,
     pub name: String,
     pub kind: Kind,
+}
+
+/// OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템. 서버 하나([`EbmsFs`])와
+/// 여러 서버를 합친 드라이브([`crate::drive::Drive`])가 구현한다.
+pub trait ReadOnlyFs: Send + Sync {
+    fn getattr(&self, ino: Ino) -> Option<Attr>;
+    fn lookup(&self, parent: Ino, name: &str) -> Option<Attr>;
+    fn parent(&self, ino: Ino) -> Option<Ino>;
+    fn readdir(&self, ino: Ino) -> Option<Vec<DirEntry>>;
+    /// `offset`부터 최대 `size` 바이트를 읽는다. 필요하면 다운로드를 기다린다.
+    fn read(&self, ino: Ino, offset: u64, size: u32) -> Result<Vec<u8>>;
+
+    /// `/`(또는 `\`)로 구분한 경로로 찾는다. 빈 문자열은 루트.
+    fn resolve(&self, path: &str) -> Option<Attr> {
+        let mut attr = self.getattr(ROOT)?;
+        for part in path.split(['/', '\\']).filter(|p| !p.is_empty()) {
+            attr = self.lookup(attr.ino, part)?;
+        }
+        Some(attr)
+    }
 }
 
 pub struct EbmsFs {
@@ -65,28 +85,24 @@ impl EbmsFs {
     pub fn tree(&self) -> Arc<Tree> {
         self.tree.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
+}
 
-    pub fn getattr(&self, ino: Ino) -> Option<Attr> {
+impl ReadOnlyFs for EbmsFs {
+    fn getattr(&self, ino: Ino) -> Option<Attr> {
         self.tree().get(ino).map(|n| attr(ino, n))
     }
 
-    pub fn lookup(&self, parent: Ino, name: &str) -> Option<Attr> {
+    fn lookup(&self, parent: Ino, name: &str) -> Option<Attr> {
         let tree = self.tree();
         let ino = tree.lookup(parent, name)?;
         tree.get(ino).map(|n| attr(ino, n))
     }
 
-    pub fn resolve(&self, path: &str) -> Option<Attr> {
-        let tree = self.tree();
-        let ino = tree.resolve(path)?;
-        tree.get(ino).map(|n| attr(ino, n))
-    }
-
-    pub fn parent(&self, ino: Ino) -> Option<Ino> {
+    fn parent(&self, ino: Ino) -> Option<Ino> {
         self.tree().get(ino).map(|n| n.parent())
     }
 
-    pub fn readdir(&self, ino: Ino) -> Option<Vec<DirEntry>> {
+    fn readdir(&self, ino: Ino) -> Option<Vec<DirEntry>> {
         let tree = self.tree();
         let children = tree.children(ino)?;
         Some(
@@ -107,8 +123,7 @@ impl EbmsFs {
         )
     }
 
-    /// `offset`부터 최대 `size` 바이트를 읽는다. 필요하면 다운로드를 기다린다.
-    pub fn read(&self, ino: Ino, offset: u64, size: u32) -> Result<Vec<u8>> {
+    fn read(&self, ino: Ino, offset: u64, size: u32) -> Result<Vec<u8>> {
         let tree = self.tree();
         let Some(Node::File {
             size: file_size,

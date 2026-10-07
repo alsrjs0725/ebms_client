@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use reqwest::{Method, StatusCode, Url, header};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tracing::warn;
@@ -35,7 +35,7 @@ pub struct Token {
     pub user: User,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct User {
     /// 서버 안의 계정 UUID. 서버마다 다르다.
     pub id: String,
@@ -45,7 +45,7 @@ pub struct User {
 }
 
 /// `GET /api/me` 응답.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Me {
     #[serde(flatten)]
     pub user: User,
@@ -56,13 +56,13 @@ pub struct Me {
     pub pre: PreUsage,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LinkedOAuth {
     pub oauth: String,
     pub name: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Tickets {
     pub available: u32,
     pub max: u32,
@@ -71,7 +71,7 @@ pub struct Tickets {
     pub next_refill_at: Option<i64>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreUsage {
     /// `YYYY-MM`
     pub month: String,
