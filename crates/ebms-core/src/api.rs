@@ -1,27 +1,94 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use reqwest::{StatusCode, header};
+use reqwest::{Method, StatusCode, Url, header};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use tracing::warn;
 
 use crate::manifest::SongManifest;
 use crate::{Error, Result};
+
+/// 서버가 Retry-After를 주지 않았을 때 기다릴 시간(초).
+const DEFAULT_RETRY_AFTER: u64 = 60;
 
 #[derive(Debug, Deserialize)]
 pub struct Version {
     pub api: u32,
     pub server: Option<String>,
+    /// 로그인에 쓸 수 있는 OAuth. 비어 있으면 로그인을 받지 않는 서버.
+    #[serde(default)]
+    pub auth: Vec<String>,
 }
 
-/// 서버 HTTP API 클라이언트.
-#[derive(Clone, Debug)]
+/// `POST /api/auth/client/token` 응답.
+#[derive(Debug, Deserialize)]
+pub struct Token {
+    pub session_key: String,
+    /// unix 초
+    pub expires_at: i64,
+    pub user: User,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct User {
+    /// 서버 안의 계정 UUID. 서버마다 다르다.
+    pub id: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub role: String,
+}
+
+/// `GET /api/me` 응답.
+#[derive(Clone, Debug, Deserialize)]
+pub struct Me {
+    #[serde(flatten)]
+    pub user: User,
+    /// 이 계정에 연결된 OAuth(Google, Discord)
+    #[serde(default)]
+    pub oauths: Vec<LinkedOAuth>,
+    pub tickets: Tickets,
+    pub pre: PreUsage,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct LinkedOAuth {
+    pub oauth: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Tickets {
+    pub available: u32,
+    pub max: u32,
+    pub refill_seconds: u64,
+    /// 다음 티켓이 차는 시각(unix 초). 가득 찼으면 None.
+    pub next_refill_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PreUsage {
+    /// `YYYY-MM`
+    pub month: String,
+    pub used_bytes: u64,
+    pub limit_bytes: u64,
+    pub throttled_kbps: u64,
+    pub throttled: bool,
+}
+
+/// 서버 HTTP API 클라이언트. 세션키가 있으면 모든 요청에 `Authorization: Bearer`로 싣는다.
+#[derive(Debug)]
 pub struct Api {
     base: String,
     http: reqwest::Client,
+    session: RwLock<Option<String>>,
+    /// 401을 받았음. 다시 로그인할 때까지 켜져 있다.
+    unauthorized: AtomicBool,
 }
 
 impl Api {
@@ -33,29 +100,153 @@ impl Api {
         Ok(Self {
             base: base.trim_end_matches('/').to_string(),
             http,
+            session: RwLock::new(None),
+            unauthorized: AtomicBool::new(false),
         })
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// 요청에 실을 세션키를 바꾼다.
+    pub fn set_session(&self, key: Option<String>) {
+        *self.session.write().unwrap_or_else(|e| e.into_inner()) = key;
+        self.unauthorized.store(false, Ordering::SeqCst);
+    }
+
+    pub fn has_session(&self) -> bool {
+        self.session
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// 세션키가 없거나 서버가 401로 거절했으면 true. 설정 창에 "다시 로그인 필요"로 보여준다.
+    pub fn needs_login(&self) -> bool {
+        !self.has_session() || self.unauthorized.load(Ordering::SeqCst)
     }
 
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base, path)
     }
 
+    fn request(&self, method: Method, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
+        let req = self.http.request(method, url);
+        match &*self.session.read().unwrap_or_else(|e| e.into_inner()) {
+            Some(key) => req.bearer_auth(key),
+            None => req,
+        }
+    }
+
     async fn get(&self, path: &str) -> Result<reqwest::Response> {
-        let url = self.url(path);
-        let resp = self.http.get(&url).send().await?;
-        check(resp, StatusCode::OK)
+        let resp = self.request(Method::GET, self.url(path)).send().await?;
+        self.check(resp, StatusCode::OK)
+    }
+
+    fn check(&self, resp: reqwest::Response, expected: StatusCode) -> Result<reqwest::Response> {
+        match resp.status() {
+            s if s == expected => Ok(resp),
+            StatusCode::UNAUTHORIZED => {
+                // 조용히 로그아웃 상태로 바꾼다. 알림은 띄우지 않는다.
+                if !self.unauthorized.swap(true, Ordering::SeqCst) {
+                    warn!(server = %self.base, "session rejected, login required");
+                }
+                Err(Error::Unauthorized)
+            }
+            StatusCode::TOO_MANY_REQUESTS => {
+                let retry_after = resp
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(DEFAULT_RETRY_AFTER);
+                Err(Error::NoTicket { retry_after })
+            }
+            s => Err(Error::Status {
+                status: s.as_u16(),
+                url: resp.url().to_string(),
+            }),
+        }
     }
 
     pub async fn version(&self) -> Result<Version> {
         Ok(self.get("/api/version").await?.json().await?)
     }
 
+    // ---- 로그인 ----
+
+    /// 브라우저로 열 클라이언트 로그인 주소.
+    pub fn authorize_url(
+        &self,
+        redirect_uri: &str,
+        state: &str,
+        code_challenge: &str,
+        device_name: &str,
+    ) -> Result<String> {
+        let mut url = Url::parse(&self.url("/auth/client/authorize"))
+            .map_err(|e| Error::Config(format!("bad server url {}: {e}", self.base)))?;
+        url.query_pairs_mut()
+            .append_pair("redirect_uri", redirect_uri)
+            .append_pair("state", state)
+            .append_pair("code_challenge", code_challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("device_name", device_name);
+        Ok(url.into())
+    }
+
+    /// 1회용 코드와 PKCE verifier를 세션키로 바꾼다.
+    pub async fn exchange_code(&self, code: &str, code_verifier: &str) -> Result<Token> {
+        let resp = self
+            .http
+            .post(self.url("/api/auth/client/token"))
+            .json(&serde_json::json!({"code": code, "code_verifier": code_verifier}))
+            .send()
+            .await?;
+        if resp.status().is_client_error() {
+            #[derive(Deserialize)]
+            struct Detail {
+                detail: String,
+            }
+            let status = resp.status();
+            let detail = resp
+                .json::<Detail>()
+                .await
+                .map(|d| d.detail)
+                .unwrap_or_else(|_| status.to_string());
+            return Err(Error::Auth(detail));
+        }
+        let token: Token = self.check(resp, StatusCode::OK)?.json().await?;
+        self.set_session(Some(token.session_key.clone()));
+        Ok(token)
+    }
+
+    /// 서버에서 현재 세션키를 폐기한다. 이미 무효인 세션키면 그대로 성공으로 본다.
+    pub async fn logout(&self) -> Result<()> {
+        let resp = self
+            .request(Method::POST, self.url("/api/auth/client/logout"))
+            .send()
+            .await?;
+        let result = match self.check(resp, StatusCode::NO_CONTENT) {
+            Ok(_) | Err(Error::Unauthorized) => Ok(()),
+            Err(e) => Err(e),
+        };
+        self.set_session(None);
+        result
+    }
+
+    pub async fn me(&self) -> Result<Me> {
+        Ok(self.get("/api/me").await?.json().await?)
+    }
+
+    // ---- 사전 다운로드 ----
+
     pub async fn chart_hash(&self) -> Result<BTreeMap<u32, String>> {
-        self.hash_map("/api/charthash").await
+        self.hash_map("/api/pre/charthash").await
     }
 
     pub async fn manifest_hash(&self) -> Result<BTreeMap<u32, String>> {
-        self.hash_map("/api/manifest/hash").await
+        self.hash_map("/api/pre/manifest/hash").await
     }
 
     async fn hash_map(&self, path: &str) -> Result<BTreeMap<u32, String>> {
@@ -73,7 +264,7 @@ impl Api {
     /// 매니페스트 청크를 받아 압축 해제된 JSON의 sha256과 함께 돌려준다.
     pub async fn manifest(&self, chunk_id: u32) -> Result<(String, Vec<SongManifest>)> {
         let body = self
-            .get(&format!("/api/manifest/{chunk_id}"))
+            .get(&format!("/api/pre/manifest/{chunk_id}"))
             .await?
             .bytes()
             .await?;
@@ -82,61 +273,25 @@ impl Api {
 
     /// 차트 청크 zip을 `dest`에 저장하고 sha256을 돌려준다.
     pub async fn download_chart_chunk(&self, chunk_id: u32, dest: &Path) -> Result<String> {
-        let resp = self.get(&format!("/api/files/chart/{chunk_id}")).await?;
+        let resp = self.get(&format!("/api/pre/chart/{chunk_id}")).await?;
         save(resp, dest).await
     }
 
-    /// 곡 zip 전체를 `dest`에 저장하고 sha256을 돌려준다.
-    pub async fn download_song(&self, song_id: u32, dest: &Path) -> Result<String> {
-        let resp = self.get(&format!("/api/files/song/id/{song_id}")).await?;
+    /// 곡의 사전 파일(배너·프리뷰 등) 하나를 압축 푼 내용으로 받는다.
+    pub async fn pre_file(&self, song_id: u32, path: &str) -> Result<Bytes> {
+        let mut url = Url::parse(&self.url(&format!("/api/pre/song/{song_id}/file")))
+            .map_err(|e| Error::Config(format!("bad server url {}: {e}", self.base)))?;
+        url.query_pairs_mut().append_pair("path", path);
+        let resp = self.request(Method::GET, url).send().await?;
+        Ok(self.check(resp, StatusCode::OK)?.bytes().await?)
+    }
+
+    // ---- 플레이 다운로드 ----
+
+    /// 곡 zip 전체를 `dest`에 저장하고 sha256을 돌려준다. 서버에서 티켓 1개가 빠진다.
+    pub async fn play_song(&self, song_id: u32, dest: &Path) -> Result<String> {
+        let resp = self.get(&format!("/api/play/song/{song_id}")).await?;
         save(resp, dest).await
-    }
-
-    /// 곡 zip의 `[start, end]`(양끝 포함) 바이트를 받는다.
-    ///
-    /// `If-Range`에 zip sha256을 넣어, 서버의 곡 파일이 바뀌었으면 엉뚱한 바이트 대신 오류를 낸다.
-    pub async fn song_range(
-        &self,
-        song_id: u32,
-        zip_sha256: &str,
-        start: u64,
-        end: u64,
-    ) -> Result<Bytes> {
-        let url = self.url(&format!("/api/files/song/id/{song_id}"));
-        let resp = self
-            .http
-            .get(&url)
-            .header(header::RANGE, format!("bytes={start}-{end}"))
-            .header(header::IF_RANGE, format!("\"{zip_sha256}\""))
-            .send()
-            .await?;
-        if resp.status() == StatusCode::OK {
-            // 전체 응답 = 파일이 바뀜. 본문은 읽지 않고 버린다.
-            return Err(Error::Integrity(format!(
-                "song {song_id} changed on server"
-            )));
-        }
-        let resp = check(resp, StatusCode::PARTIAL_CONTENT)?;
-        let body = resp.bytes().await?;
-        let expected = end - start + 1;
-        if body.len() as u64 != expected {
-            return Err(Error::Integrity(format!(
-                "song {song_id} range {start}-{end}: got {} bytes",
-                body.len()
-            )));
-        }
-        Ok(body)
-    }
-}
-
-fn check(resp: reqwest::Response, expected: StatusCode) -> Result<reqwest::Response> {
-    if resp.status() == expected {
-        Ok(resp)
-    } else {
-        Err(Error::Status {
-            status: resp.status().as_u16(),
-            url: resp.url().to_string(),
-        })
     }
 }
 

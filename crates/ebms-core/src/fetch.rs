@@ -1,32 +1,24 @@
 //! 요청 시 다운로드.
 //!
-//! - 가벼운 파일(이미지, 프리뷰 등)은 그 파일만 `Range`로 받는다.
-//! - 한 곡에서 무거운 파일(키음, 영상)이 `promote_after`개 이상 열리면 곡 zip 전체를 한 번에 받는다.
+//! - 사전 파일(배너·프리뷰 등)은 사전 API로 그 파일만 받는다.
+//! - 플레이 파일(키음·BGA 등)을 처음 열면 플레이 API로 곡 zip 전체를 받는다(티켓 1개).
+//! - 티켓이 없어 `429`를 받으면 `Retry-After` 동안 그 곡의 플레이 다운로드를 다시 요청하지 않는다.
 //! - 같은 파일·곡을 동시에 요청하면 한 번만 받는다.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
 use crate::api::Api;
 use crate::cache::Cache;
-use crate::manifest::FileEntry;
+use crate::manifest::{FileEntry, FileKind};
 use crate::paths::Paths;
 use crate::tree::SongInfo;
 use crate::{Error, Result};
-
-const LOCAL_HEADER_LEN: u64 = 30;
-const LOCAL_HEADER_SIG: u32 = 0x0403_4b50;
-/// local header의 extra 필드를 위해 미리 더 받는 바이트.
-const HEADER_SLACK: u64 = 256;
-
-const HEAVY_EXTS: &[&str] = &[
-    "wav", "ogg", "flac", "mp3", "m4a", "opus", "mpg", "mpeg", "mp4", "avi", "wmv", "webm", "m4v",
-    "mkv",
-];
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
 enum Key {
@@ -38,20 +30,19 @@ pub struct Fetcher {
     api: Arc<Api>,
     cache: Arc<Cache>,
     paths: Paths,
-    promote_after: usize,
     locks: Mutex<HashMap<Key, Arc<tokio::sync::Mutex<()>>>>,
-    heavy_opened: Mutex<HashMap<u32, HashSet<String>>>,
+    /// 티켓이 없어 플레이 다운로드를 멈춘 곡과 다시 시도할 시각
+    retry_at: Mutex<HashMap<u32, Instant>>,
 }
 
 impl Fetcher {
-    pub fn new(api: Arc<Api>, cache: Arc<Cache>, paths: Paths, promote_after: usize) -> Self {
+    pub fn new(api: Arc<Api>, cache: Arc<Cache>, paths: Paths) -> Self {
         Self {
             api,
             cache,
             paths,
-            promote_after,
             locks: Mutex::new(HashMap::new()),
-            heavy_opened: Mutex::new(HashMap::new()),
+            retry_at: Mutex::new(HashMap::new()),
         }
     }
 
@@ -65,22 +56,14 @@ impl Fetcher {
             return Ok(p);
         }
 
-        if is_heavy(&entry.path) && self.note_heavy(song.song_id, &entry.path) {
-            match self.ensure_song(song).await {
-                Ok(()) => {
-                    if let Some(p) = self.cache.get(song.song_id, &entry.path)? {
-                        return Ok(p);
-                    }
-                }
-                Err(e) => {
-                    warn!(song_id = song.song_id, %e, "full song download failed, falling back to file");
-                    // 카운트를 비워 다음 재시도까지 파일 단위로 받는다.
-                    self.heavy_opened
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&song.song_id);
-                }
-            }
+        if entry.kind == FileKind::Play {
+            self.ensure_song(song).await?;
+            return self.cache.get(song.song_id, &entry.path)?.ok_or_else(|| {
+                Error::Integrity(format!(
+                    "song {}: {} not in song zip",
+                    song.song_id, entry.path
+                ))
+            });
         }
 
         let lock = self.lock(Key::File(song.song_id, entry.offset));
@@ -88,7 +71,8 @@ impl Fetcher {
         if let Some(p) = self.cache.get(song.song_id, &entry.path)? {
             return Ok(p);
         }
-        let data = self.fetch_entry(song, entry).await?;
+        let data = self.api.pre_file(song.song_id, &entry.path).await?;
+        verify_entry(entry, &data)?;
         let path = self.cache.put(song.song_id, &entry.path, &data)?;
         self.evict_in_background();
         Ok(path)
@@ -96,6 +80,7 @@ impl Fetcher {
 
     /// 곡 zip 전체를 받아 모든 파일을 캐시에 넣는다.
     pub async fn ensure_song(&self, song: &SongInfo) -> Result<()> {
+        self.check_backoff(song.song_id)?;
         let lock = self.lock(Key::Song(song.song_id));
         let _guard = lock.lock().await;
         if song
@@ -105,6 +90,8 @@ impl Fetcher {
         {
             return Ok(());
         }
+        // 잠금을 기다리는 동안 앞선 요청이 429를 받았을 수 있다.
+        self.check_backoff(song.song_id)?;
 
         info!(
             song_id = song.song_id,
@@ -113,7 +100,7 @@ impl Fetcher {
         );
         let tmp = self.paths.tmp_file(&format!("song_{}", song.song_id));
         let result = async {
-            let sha = self.api.download_song(song.song_id, &tmp).await?;
+            let sha = self.api.play_song(song.song_id, &tmp).await?;
             if sha != song.zip_sha256 {
                 return Err(Error::Integrity(format!(
                     "song {}: expected {}, got {sha}",
@@ -129,57 +116,39 @@ impl Fetcher {
         }
         .await;
         let _ = std::fs::remove_file(&tmp);
+        if let Err(Error::NoTicket { retry_after }) = &result {
+            // 알림 없이 로그에만 남긴다.
+            warn!(
+                song_id = song.song_id,
+                retry_after, "no download ticket, pausing this song"
+            );
+            self.retry_at
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    song.song_id,
+                    Instant::now() + Duration::from_secs(*retry_after),
+                );
+        }
         result?;
         self.evict_in_background();
         Ok(())
     }
 
-    /// 곡 zip에서 파일 하나만 받는다.
-    async fn fetch_entry(&self, song: &SongInfo, entry: &FileEntry) -> Result<Vec<u8>> {
-        let start = entry.offset;
-        let name_len = entry.path.len() as u64;
-        let guess_end = (start + LOCAL_HEADER_LEN + name_len + entry.comp_size + HEADER_SLACK)
-            .min(song.zip_size)
-            .saturating_sub(1);
-        let mut buf = self
-            .api
-            .song_range(song.song_id, &song.zip_sha256, start, guess_end)
-            .await?
-            .to_vec();
-
-        if buf.len() < LOCAL_HEADER_LEN as usize
-            || u32::from_le_bytes(buf[0..4].try_into().unwrap()) != LOCAL_HEADER_SIG
-        {
-            return Err(Error::Integrity(format!(
-                "song {}: bad local header for {}",
-                song.song_id, entry.path
-            )));
+    /// 티켓을 기다리는 곡이면 서버에 묻지 않고 바로 `NoTicket`을 돌려준다.
+    fn check_backoff(&self, song_id: u32) -> Result<()> {
+        let mut map = self.retry_at.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(&at) = map.get(&song_id) else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if at <= now {
+            map.remove(&song_id);
+            return Ok(());
         }
-        let n = u16::from_le_bytes([buf[26], buf[27]]) as u64;
-        let m = u16::from_le_bytes([buf[28], buf[29]]) as u64;
-        let data_start = LOCAL_HEADER_LEN + n + m;
-        let need = data_start + entry.comp_size;
-        if (buf.len() as u64) < need {
-            let more = self
-                .api
-                .song_range(
-                    song.song_id,
-                    &song.zip_sha256,
-                    start + buf.len() as u64,
-                    start + need - 1,
-                )
-                .await?;
-            buf.extend_from_slice(&more);
-        }
-        let raw = &buf[data_start as usize..need as usize];
-        decode_entry(entry, raw)
-    }
-
-    fn note_heavy(&self, song_id: u32, path: &str) -> bool {
-        let mut map = self.heavy_opened.lock().unwrap_or_else(|e| e.into_inner());
-        let set = map.entry(song_id).or_default();
-        set.insert(path.to_string());
-        set.len() >= self.promote_after
+        Err(Error::NoTicket {
+            retry_after: (at - now).as_secs().max(1),
+        })
     }
 
     fn lock(&self, key: Key) -> Arc<tokio::sync::Mutex<()>> {
@@ -201,29 +170,8 @@ impl Fetcher {
     }
 }
 
-fn is_heavy(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
-    if name.starts_with("preview") {
-        return false; // 선곡 화면 프리뷰
-    }
-    crate::extension(path).is_some_and(|e| HEAVY_EXTS.contains(&e.as_str()))
-}
-
-fn decode_entry(entry: &FileEntry, raw: &[u8]) -> Result<Vec<u8>> {
-    let data = match entry.method {
-        0 => raw.to_vec(),
-        8 => {
-            let mut out = Vec::with_capacity(entry.size as usize);
-            flate2::read::DeflateDecoder::new(raw).read_to_end(&mut out)?;
-            out
-        }
-        m => {
-            return Err(Error::Other(format!(
-                "unsupported zip method {m} for {}",
-                entry.path
-            )));
-        }
-    };
+/// 사전 API로 받은 파일이 매니페스트와 같은지 확인한다.
+fn verify_entry(entry: &FileEntry, data: &[u8]) -> Result<()> {
     if data.len() as u64 != entry.size {
         return Err(Error::Integrity(format!(
             "{}: size {} != {}",
@@ -232,10 +180,10 @@ fn decode_entry(entry: &FileEntry, raw: &[u8]) -> Result<Vec<u8>> {
             entry.size
         )));
     }
-    if Some(crc32fast::hash(&data)) != entry.crc32_value() {
+    if Some(crc32fast::hash(data)) != entry.crc32_value() {
         return Err(Error::Integrity(format!("{}: crc32 mismatch", entry.path)));
     }
-    Ok(data)
+    Ok(())
 }
 
 fn extract_song(cache: &Cache, song: &SongInfo, zip_path: &std::path::Path) -> Result<()> {
@@ -262,18 +210,4 @@ fn extract_song(cache: &Cache, song: &SongInfo, zip_path: &std::path::Path) -> R
         cache.put(song.song_id, &name, &data)?;
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn heavy_classification() {
-        assert!(is_heavy("bgm01.wav"));
-        assert!(is_heavy("sub/KICK.OGG"));
-        assert!(!is_heavy("preview.ogg"));
-        assert!(!is_heavy("banner.png"));
-        assert!(!is_heavy("_7a.bme"));
-    }
 }
