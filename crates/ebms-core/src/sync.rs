@@ -28,7 +28,7 @@ impl SyncReport {
 
 pub async fn sync_all(api: &Api, paths: &Paths, index: &Index) -> Result<SyncReport> {
     let version = api.version().await?;
-    if version.api != crate::API_VERSION {
+    if !crate::API_VERSIONS.contains(&version.api) {
         return Err(Error::ApiVersion(version.api));
     }
     let mut report = SyncReport::default();

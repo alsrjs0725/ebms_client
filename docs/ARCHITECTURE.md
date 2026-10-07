@@ -69,10 +69,11 @@ E:\ (또는 ~/ebms 마운트 지점)
 │ vfs       OS 백엔드(WinFsp / FUSE) → 공통 trait  │
 ├──────────────────────────────────────────────────┤
 │ tree      곡/파일 트리 (index.sqlite에서 메모리로) │
-│ fetcher   요청 합치기, 우선순위, Range 다운로드    │
+│ fetcher   요청 합치기, 사전/플레이 다운로드       │
 │ cache     에셋 캐시, LRU, 고정, 무결성            │
 │ sync      청크·매니페스트 동기화                  │
-│ api       서버 HTTP 클라이언트                    │
+│ api       서버 HTTP 클라이언트 (Bearer 세션키)    │
+│ auth      브라우저 로그인 (루프백 + PKCE)         │
 │ bms       차트 파서·해시                          │
 └──────────────────────────────────────────────────┘
         ▲ 상태/이벤트
@@ -102,14 +103,24 @@ beatoraja가 파일을 읽는 시점은 두 가지다.
 | 선곡 화면 이동 | `#BANNER`, `#STAGEFILE`, `preview*.ogg` | **그 파일만** 작게 받기 |
 | 플레이 시작 | 키음·BGA 수백 개 | **곡 전체**를 한 번에 받기 |
 
-그래서 혼합 전략을 쓴다.
-1. **파일 단위**: 곡 zip은 항목마다 따로 압축되어 있으므로 HTTP `Range`로 해당 항목 바이트만 받아 압축을 푼다. 배너·프리뷰가 여기에 해당.
-2. **곡 단위 승격**: 한 곡에서 키음(.wav/.ogg/.flac)이나 영상이 N개(기본 3개) 이상 열리면 곡 zip 전체를 한 번에 받는다. 나머지 파일 요청은 이 다운로드를 기다린다.
-3. 차트 헤더로 배너·스테이지파일 이름을 미리 알 수 있으므로, 이 파일들은 "가벼운 파일"로 분류해 승격 판단에서 뺀다.
+서버가 곡 등록 때 파일마다 `kind`(`pre`/`play`)를 정해 매니페스트에 싣는다. 클라이언트는 이 값으로 API를 고른다.
+1. **사전 파일**(`pre`: 배너·스테이지파일·프리뷰): `/api/pre/song/{id}/file?path=`로 그 파일만 받는다. 이번 달 사전 다운로드 사용량에 더해지고, 한도를 넘으면 서버가 감속한다.
+2. **플레이 파일**(`play`: 키음·BGA): 처음 열 때 `/api/play/song/{id}`로 곡 zip 전체를 받는다. 티켓 1개를 쓴다. 나머지 파일 요청은 이 다운로드를 기다린다.
+3. 티켓이 없으면 서버가 `429` + `Retry-After`를 준다. 그 파일 읽기는 오류로 돌리고, `Retry-After` 동안 그 곡의 플레이 다운로드를 다시 요청하지 않는다. 알림 없이 로그에만 남긴다.
 
 다운로드 진행은 따로 표시하지 않는다. 구동기 입장에서는 파일 읽기가 조금 오래 걸리는 것으로 보일 뿐이다.
 
-## 7. 서버에 필요한 변경
+## 7. 로그인과 여러 서버
+
+한 사용자가 여러 EBMS 서버에 로그인한다. 계정은 서버마다 따로이고 서버끼리는 통신하지 않는다.
+
+- 서버 목록은 `config.toml`의 `servers = [{id, url, name}]`. 로컬 데이터는 서버별 폴더에 따로 둔다.
+- 로그인: `127.0.0.1` 빈 포트에서 수신을 열고 브라우저로 `/auth/client/authorize`를 연다(PKCE `S256`). 서버가 1회용 `code`를 붙여 루프백으로 돌려보내면 `state`를 확인하고 `code` + `code_verifier`를 `/api/auth/client/token`에 보내 세션키를 받는다.
+- 세션키는 OS 키체인(`keyring`)에 서버 주소별로 저장한다. 키체인을 못 쓰면 서버 데이터 폴더의 `session` 파일(권한 600).
+- 모든 API 요청에 `Authorization: Bearer <세션키>`. `401`을 받으면 조용히 로그아웃 상태로 바꾸고(`Api::needs_login`) 설정 창에만 "다시 로그인 필요"를 보여준다.
+- CLI: `ebms server add|list|remove`, `ebms login|logout|whoami`, 나머지 명령은 `--server`로 대상을 고른다(서버가 하나면 생략).
+
+## 8. 서버에 필요한 변경
 
 > 서버에 반영이 끝난 항목은 이 절에서 삭제한다. 남아 있는 항목은 아직 반영되지 않은 것이다.
 
@@ -119,7 +130,7 @@ beatoraja가 파일을 읽는 시점은 두 가지다.
 
 임시 우회: 매니페스트 `files`의 (size, crc32)를 청크 zip 항목과 맞춰 매핑하고, 맞지 않는 차트는 `{sha256}{ext}` 이름으로 보여준다.
 
-## 8. 저장소 구조
+## 9. 저장소 구조
 
 ```
 ebms_client/
@@ -135,15 +146,17 @@ ebms_client/
 └─ .github/workflows/
 ```
 
-## 9. 로컬 데이터
+## 10. 로컬 데이터
 
 ```
 <앱 데이터>/
-├─ config.toml
-├─ index.sqlite        # chunk, chart, song, song_file, cache_entry
-├─ charts/             # 청크 zip 원본 (가상 FS가 차트를 여기서 읽음)
-├─ cache/<song_id>/    # 받은 에셋
-└─ tmp/
+├─ config.toml                 # 서버 목록
+└─ servers/<server_id>/
+   ├─ index.sqlite             # chunk, chart, song, song_file, cache_entry
+   ├─ charts/                  # 청크 zip 원본 (가상 FS가 차트를 여기서 읽음)
+   ├─ cache/<song_id>/         # 받은 에셋
+   ├─ session                  # 세션키 (키체인을 못 쓸 때만)
+   └─ tmp/
 ```
 
 | 테이블 | 주요 컬럼 |
@@ -153,16 +166,16 @@ ebms_client/
 | `chart` | sha256, md5, song_id, title, artist, … |
 | `cache_entry` | song_id, path, size, last_access, pinned |
 
-## 10. 기본값으로 정한 것
+## 11. 기본값으로 정한 것
 
 - Windows 마운트: 빈 드라이브 문자 자동 선택(설정에서 폴더 마운트로 변경 가능)
 - 폴더명: `{song_id:05} {artist} - {title}` (ID 접두사로 이름 충돌 방지)
 - 읽기 전용 마운트
-- 캐시 한도 20GB, 곡 단위 승격 임계값 3개
+- 캐시 한도 20GB (서버별)
 - 자동 동기화: 시작 시 + 30분마다
 - 로그인 시 자동 실행, 업데이트는 다음 실행 때 조용히 적용
 
-## 11. 구현 순서
+## 12. 구현 순서
 
 1. core: api + sync + index + tree + fetcher + cache, CLI로 검증 (서버 반영 완료로 바로 시작)
 2. Linux FUSE 백엔드: 같은 코어를 실제 마운트로 검증

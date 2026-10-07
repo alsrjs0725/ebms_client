@@ -2,27 +2,54 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
+use ebms_core::api::Api;
+use ebms_core::auth::LoginRequest;
+use ebms_core::config::{AppDir, Config, ServerEntry};
 use ebms_core::fs::Kind;
-use ebms_core::{Client, Options};
+use ebms_core::session::SessionStore;
+use ebms_core::{Client, Error, Options};
+
+/// 브라우저 로그인을 기다리는 시간
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Parser)]
 #[command(name = "ebms", about = "EBMS client")]
 struct Cli {
-    /// 서버 주소
-    #[arg(long, env = "EBMS_SERVER", default_value = "http://localhost:8000")]
-    server: String,
-    /// 로컬 데이터 폴더
-    #[arg(long, env = "EBMS_DATA", default_value = "ebms-data")]
-    data: PathBuf,
+    /// 대상 서버 (id, 이름 또는 주소). 서버가 하나뿐이면 생략
+    #[arg(long, short, env = "EBMS_SERVER", global = true)]
+    server: Option<String>,
+    /// 앱 데이터 폴더 (기본: OS 앱 데이터 폴더의 ebms)
+    #[arg(long, env = "EBMS_DATA", global = true)]
+    data: Option<PathBuf>,
+    /// 세션키를 OS 키체인 대신 서버 데이터 폴더의 파일에 저장
+    #[arg(long, env = "EBMS_NO_KEYRING", global = true)]
+    no_keyring: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// 서버 목록 관리
+    #[command(subcommand)]
+    Server(ServerCmd),
+    /// 브라우저로 로그인하고 세션키를 저장
+    Login {
+        /// 브라우저를 열지 않고 주소만 출력
+        #[arg(long)]
+        no_browser: bool,
+        /// 서버의 기기 목록에 보일 이름
+        #[arg(long)]
+        device_name: Option<String>,
+    },
+    /// 세션키를 폐기하고 지움
+    Logout,
+    /// 로그인한 계정과 남은 티켓·사전 다운로드 사용량
+    Whoami,
     /// 차트 청크와 매니페스트를 동기화
     Sync,
     /// 가상 트리 목록
@@ -44,6 +71,48 @@ enum Cmd {
     },
 }
 
+#[derive(Subcommand)]
+enum ServerCmd {
+    /// 서버 추가 (/api/version으로 확인)
+    Add {
+        url: String,
+        /// 표시 이름 (기본: 호스트 이름)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// 서버 목록과 로그인 상태
+    List,
+    /// 서버 삭제 (로그아웃하고 목록에서 뺌. 로컬 데이터는 남김)
+    Remove { server: String },
+}
+
+struct App {
+    dir: AppDir,
+    config: Config,
+    use_keyring: bool,
+}
+
+impl App {
+    fn server(&self, selector: Option<&str>) -> anyhow::Result<ServerEntry> {
+        self.config.select(selector).cloned().map_err(|e| match e {
+            Error::Config(msg) => {
+                anyhow::anyhow!("{msg} (ebms server add <url>, ebms server list)")
+            }
+            e => e.into(),
+        })
+    }
+
+    fn session(&self, server: &ServerEntry) -> SessionStore {
+        SessionStore::new(&server.url, &self.dir.server_dir(server), self.use_keyring)
+    }
+
+    fn client(&self, server: &ServerEntry) -> anyhow::Result<Client> {
+        let mut opts = Options::new(&server.url, self.dir.server_dir(server));
+        opts.session = self.session(server).load()?;
+        Ok(Client::open(&opts)?)
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -55,14 +124,64 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let rt = tokio::runtime::Runtime::new()?;
-    let client = Client::open(&Options::new(&cli.server, &cli.data))?;
+    let root = match cli.data {
+        Some(d) => d,
+        None => AppDir::default_root().context("no app data folder, use --data")?,
+    };
+    let dir = AppDir::new(root);
+    let mut app = App {
+        config: dir.load_config()?,
+        dir,
+        use_keyring: !cli.no_keyring,
+    };
+    let sel = cli.server.as_deref();
 
     match cli.cmd {
+        Cmd::Server(cmd) => server_cmd(&rt, &mut app, cmd)?,
+        Cmd::Login {
+            no_browser,
+            device_name,
+        } => {
+            let server = app.server(sel)?;
+            let api = Api::new(&server.url)?;
+            let device_name = device_name.unwrap_or_else(default_device_name);
+            let req = rt.block_on(LoginRequest::start(&api, &device_name))?;
+            eprintln!("Log in with your browser:\n{}", req.url());
+            if !no_browser && let Err(e) = open::that_detached(req.url()) {
+                tracing::warn!(%e, "could not open browser");
+            }
+            let token = rt.block_on(req.finish(&api, LOGIN_TIMEOUT))?;
+            app.session(&server).save(&token.session_key)?;
+            println!("{}: logged in as {}", server.name, token.user.display_name);
+        }
+        Cmd::Logout => {
+            let server = app.server(sel)?;
+            let store = app.session(&server);
+            match store.load()? {
+                Some(key) => {
+                    let api = Api::new(&server.url)?;
+                    api.set_session(Some(key));
+                    // 서버에 닿지 않아도 로컬 세션키는 지운다.
+                    if let Err(e) = rt.block_on(api.logout()) {
+                        tracing::warn!(%e, "server logout failed");
+                    }
+                    store.clear()?;
+                    println!("{}: logged out", server.name);
+                }
+                None => println!("{}: not logged in", server.name),
+            }
+        }
+        Cmd::Whoami => {
+            let server = app.server(sel)?;
+            whoami(&rt, &app, &server)?;
+        }
         Cmd::Sync => {
-            let report = rt.block_on(client.sync())?;
+            let client = app.client(&app.server(sel)?)?;
+            let report = rt.block_on(client.sync()).map_err(login_hint)?;
             println!("{report:?}");
         }
         Cmd::Ls { path } => {
+            let client = app.client(&app.server(sel)?)?;
             let fs = client.fs(rt.handle().clone())?;
             let attr = fs
                 .resolve(&path)
@@ -78,6 +197,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Cat { path } => {
+            let client = app.client(&app.server(sel)?)?;
             let fs = client.fs(rt.handle().clone())?;
             let attr = fs
                 .resolve(&path)
@@ -88,7 +208,7 @@ fn main() -> anyhow::Result<()> {
             let mut out = std::io::stdout().lock();
             let mut offset = 0;
             while offset < attr.size {
-                let buf = fs.read(attr.ino, offset, 1 << 20)?;
+                let buf = fs.read(attr.ino, offset, 1 << 20).map_err(login_hint)?;
                 if buf.is_empty() {
                     break;
                 }
@@ -97,8 +217,12 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Status => {
+            let server = app.server(sel)?;
+            let client = app.client(&server)?;
             let fs = client.fs(rt.handle().clone())?;
             let tree = fs.tree();
+            println!("server: {} ({})", server.name, server.url);
+            println!("data: {}", client.paths.root().display());
             println!("songs: {}", tree.song_count());
             println!("nodes: {}", tree.node_count());
             println!("cache: {} bytes", client.fetcher.cache().total()?);
@@ -107,9 +231,157 @@ fn main() -> anyhow::Result<()> {
         Cmd::Mount {
             mountpoint,
             sync_minutes,
-        } => mount(&rt, client, &mountpoint, sync_minutes)?,
+        } => {
+            let client = app.client(&app.server(sel)?)?;
+            mount(&rt, client, &mountpoint, sync_minutes)?
+        }
     }
     Ok(())
+}
+
+fn server_cmd(rt: &tokio::runtime::Runtime, app: &mut App, cmd: ServerCmd) -> anyhow::Result<()> {
+    match cmd {
+        ServerCmd::Add { url, name } => {
+            let url = ebms_core::config::normalize_url(&url)?;
+            let version = rt
+                .block_on(Api::new(&url)?.version())
+                .with_context(|| format!("{url} is not an EBMS server"))?;
+            if !ebms_core::API_VERSIONS.contains(&version.api) {
+                bail!("unsupported server api version {}", version.api);
+            }
+            let entry = app.config.add(&url, name.as_deref())?.clone();
+            app.dir.save_config(&app.config)?;
+            println!("added {} ({}) as {}", entry.name, entry.url, entry.id);
+            if !version.auth.is_empty() {
+                println!("login: ebms login --server {}", entry.id);
+            }
+        }
+        ServerCmd::List => {
+            if app.config.servers.is_empty() {
+                println!("no server. ebms server add <url>");
+            }
+            for s in &app.config.servers {
+                let login = match app.session(s).load() {
+                    Ok(Some(_)) => "logged in",
+                    Ok(None) => "logged out",
+                    Err(_) => "?",
+                };
+                println!("{}\t{}\t{}\t{login}", s.id, s.name, s.url);
+            }
+        }
+        ServerCmd::Remove { server } => {
+            let entry = app.server(Some(&server))?;
+            let store = app.session(&entry);
+            if let Some(key) = store.load()? {
+                let api = Api::new(&entry.url)?;
+                api.set_session(Some(key));
+                if let Err(e) = rt.block_on(api.logout()) {
+                    tracing::warn!(%e, "server logout failed");
+                }
+            }
+            store.clear()?;
+            app.config.remove(&entry.id);
+            app.dir.save_config(&app.config)?;
+            println!(
+                "removed {}. local data kept in {}",
+                entry.name,
+                app.dir.server_dir(&entry).display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn whoami(rt: &tokio::runtime::Runtime, app: &App, server: &ServerEntry) -> anyhow::Result<()> {
+    println!("server: {} ({})", server.name, server.url);
+    let Some(key) = app.session(server).load()? else {
+        println!("not logged in (ebms login)");
+        return Ok(());
+    };
+    let api = Api::new(&server.url)?;
+    api.set_session(Some(key));
+    let me = match rt.block_on(api.me()) {
+        Err(Error::Unauthorized) => {
+            println!("login required (ebms login)");
+            return Ok(());
+        }
+        r => r?,
+    };
+    println!("user: {} ({})", me.user.display_name, me.user.id);
+    if me.user.role != "user" {
+        println!("role: {}", me.user.role);
+    }
+    let oauths: Vec<String> = me
+        .oauths
+        .iter()
+        .map(|o| format!("{} {}", o.oauth, o.name).trim().to_string())
+        .collect();
+    println!("oauth: {}", oauths.join(", "));
+    let t = &me.tickets;
+    let refill = match t.next_refill_at {
+        Some(at) => format!(", next in {}s", (at - unix_now()).max(0)),
+        None => String::new(),
+    };
+    println!("tickets: {}/{}{refill}", t.available, t.max);
+    let p = &me.pre;
+    println!(
+        "pre download ({}): {} / {}{}",
+        p.month,
+        human_bytes(p.used_bytes),
+        human_bytes(p.limit_bytes),
+        if p.throttled {
+            format!(", throttled to {} Kbps", p.throttled_kbps)
+        } else {
+            String::new()
+        }
+    );
+    Ok(())
+}
+
+/// 401이면 다시 로그인하라고 알려 준다.
+fn login_hint(e: Error) -> anyhow::Error {
+    match e {
+        Error::Unauthorized => anyhow::anyhow!("login required: ebms login"),
+        e => e.into(),
+    }
+}
+
+fn default_device_name() -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .ok()
+        .or_else(|| {
+            std::fs::read_to_string("/etc/hostname")
+                .ok()
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty());
+    match host {
+        Some(h) => format!("ebms-cli ({h})"),
+        None => "ebms-cli".into(),
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -342,6 +342,7 @@ mod tests {
             comp_size: size,
             crc32: format!("{crc:08x}"),
             method: 0,
+            kind: Default::default(),
         }
     }
 

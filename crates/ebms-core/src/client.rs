@@ -16,8 +16,8 @@ pub struct Options {
     pub data_dir: PathBuf,
     /// 캐시 한도 (바이트)
     pub cache_limit: u64,
-    /// 한 곡에서 무거운 파일이 몇 개 열리면 곡 전체를 받을지
-    pub promote_after: usize,
+    /// 이 서버의 세션키
+    pub session: Option<String>,
 }
 
 impl Options {
@@ -26,7 +26,7 @@ impl Options {
             server: server.into(),
             data_dir: data_dir.into(),
             cache_limit: 20 << 30,
-            promote_after: 3,
+            session: None,
         }
     }
 }
@@ -44,6 +44,7 @@ impl Client {
         let paths = Paths::new(&opts.data_dir);
         paths.create_dirs()?;
         let api = Arc::new(Api::new(&opts.server)?);
+        api.set_session(opts.session.clone());
         let index = Arc::new(Index::open(&paths.index())?);
         let cache = Arc::new(Cache::new(
             paths.cache(),
@@ -51,12 +52,7 @@ impl Client {
             index.clone(),
             opts.cache_limit,
         ));
-        let fetcher = Arc::new(Fetcher::new(
-            api.clone(),
-            cache,
-            paths.clone(),
-            opts.promote_after,
-        ));
+        let fetcher = Arc::new(Fetcher::new(api.clone(), cache, paths.clone()));
         Ok(Self {
             api,
             paths,

@@ -1,20 +1,28 @@
-//! ebms_server API를 흉내 내는 목 서버로 동기화·가상 FS·다운로드를 검증한다.
+//! ebms_server API를 흉내 내는 목 서버로 로그인·동기화·가상 FS·다운로드를 검증한다.
 
-use std::collections::HashMap;
-use std::io::{Cursor, Write};
+use std::collections::{HashMap, HashSet};
+use std::io::{Cursor, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::response::{IntoResponse, Redirect};
+use axum::routing::{get, post};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ebms_core::api::Api;
+use ebms_core::auth::LoginRequest;
 use ebms_core::fs::{EbmsFs, Kind};
-use ebms_core::manifest::{FileEntry, SongManifest};
-use ebms_core::{Client, Options};
+use ebms_core::manifest::{FileEntry, FileKind, SongManifest};
+use ebms_core::{Client, Error, Options};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
+
+const KEY: &str = "test-session-key";
 
 fn sha(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
@@ -25,12 +33,19 @@ struct Server {
     chart_chunks: HashMap<u32, Vec<u8>>,
     manifests: HashMap<u32, Vec<u8>>,
     songs: HashMap<u32, Vec<u8>>,
+    /// 사전 파일 경로
+    pre_paths: HashSet<String>,
+    /// 유효한 세션키
+    sessions: HashSet<String>,
+    /// 1회용 코드 → code_challenge
+    codes: HashMap<String, String>,
+    tickets: u32,
 }
 
 #[derive(Default)]
 struct Counters {
-    song_full: AtomicUsize,
-    song_range: AtomicUsize,
+    play: AtomicUsize,
+    pre_file: AtomicUsize,
     chart_chunk: AtomicUsize,
     manifest: AtomicUsize,
 }
@@ -41,69 +56,172 @@ struct AppState {
     counters: Arc<Counters>,
 }
 
-fn hashes(map: &HashMap<u32, Vec<u8>>) -> axum::Json<HashMap<String, String>> {
-    axum::Json(map.iter().map(|(k, v)| (k.to_string(), sha(v))).collect())
+impl AppState {
+    fn server(&self) -> std::sync::MutexGuard<'_, Server> {
+        self.server.lock().unwrap()
+    }
+
+    /// 서버 `current_user`처럼 Bearer 세션키를 확인한다.
+    fn authorized(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        let key = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        match key {
+            Some(k) if self.server().sessions.contains(k) => Ok(()),
+            _ => Err(StatusCode::UNAUTHORIZED),
+        }
+    }
 }
 
-/// 서버 `blob_response`의 Range / If-Range 동작.
-fn blob(headers: &HeaderMap, data: &[u8], counters: &Counters) -> Response {
-    let etag = format!("\"{}\"", sha(data));
-    let if_range_ok = headers
-        .get(header::IF_RANGE)
-        .is_none_or(|v| v.to_str().unwrap() == etag);
-    if let (true, Some(range)) = (if_range_ok, headers.get(header::RANGE)) {
-        let r = range.to_str().unwrap().strip_prefix("bytes=").unwrap();
-        let (a, b) = r.split_once('-').unwrap();
-        let start: usize = a.parse().unwrap();
-        let end: usize = b.parse::<usize>().unwrap().min(data.len() - 1);
-        counters.song_range.fetch_add(1, Ordering::SeqCst);
-        return (
-            StatusCode::PARTIAL_CONTENT,
-            [
-                (
-                    header::CONTENT_RANGE,
-                    format!("bytes {start}-{end}/{}", data.len()),
-                ),
-                (header::ETAG, etag),
-            ],
-            data[start..=end].to_vec(),
-        )
-            .into_response();
-    }
-    counters.song_full.fetch_add(1, Ordering::SeqCst);
-    ([(header::ETAG, etag)], data.to_vec()).into_response()
+fn hashes(map: &HashMap<u32, Vec<u8>>) -> HashMap<String, String> {
+    map.iter().map(|(k, v)| (k.to_string(), sha(v))).collect()
+}
+
+fn me_json() -> serde_json::Value {
+    json!({
+        "id": "0b5f3c1e-0000-4000-8000-000000000001",
+        "display_name": "Tester",
+        "email": null,
+        "role": "user",
+        "oauths": [{"oauth": "google", "name": "tester@example.com"}],
+        "session": {"kind": "client"},
+        "tickets": {"available": 5, "max": 5, "refill_seconds": 60, "next_refill_at": null},
+        "pre": {"month": "2026-10", "used_bytes": 0, "limit_bytes": 10737418240u64,
+                "throttled_kbps": 500, "throttled": false},
+    })
 }
 
 fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
     let app = Router::new()
-        .route("/api/version", get(|| async { axum::Json(serde_json::json!({"api": 1, "server": "test"})) }))
         .route(
-            "/api/charthash",
-            get(|State(s): State<AppState>| async move { hashes(&s.server.lock().unwrap().chart_chunks) }),
+            "/api/version",
+            get(|| async { axum::Json(json!({"api": 1, "server": "test", "auth": ["google", "discord"]})) }),
         )
+        // ---- 로그인 (웹에는 이미 로그인돼 있다고 가정) ----
         .route(
-            "/api/manifest/hash",
-            get(|State(s): State<AppState>| async move { hashes(&s.server.lock().unwrap().manifests) }),
-        )
-        .route(
-            "/api/manifest/{id}",
-            get(|State(s): State<AppState>, Path(id): Path<u32>| async move {
-                s.counters.manifest.fetch_add(1, Ordering::SeqCst);
-                s.server.lock().unwrap().manifests[&id].clone()
+            "/auth/client/authorize",
+            get(|State(s): State<AppState>, Query(q): Query<HashMap<String, String>>| async move {
+                let redirect = &q["redirect_uri"];
+                assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
+                assert_eq!(q["code_challenge_method"], "S256");
+                assert!(!q["device_name"].is_empty());
+                let code = format!("code-{}", s.server().codes.len());
+                s.server().codes.insert(code.clone(), q["code_challenge"].clone());
+                Redirect::to(&format!("{redirect}?code={code}&state={}", q["state"]))
             }),
         )
         .route(
-            "/api/files/chart/{id}",
-            get(|State(s): State<AppState>, Path(id): Path<u32>| async move {
-                s.counters.chart_chunk.fetch_add(1, Ordering::SeqCst);
-                s.server.lock().unwrap().chart_chunks[&id].clone()
+            "/api/auth/client/token",
+            post(|State(s): State<AppState>, axum::Json(body): axum::Json<serde_json::Value>| async move {
+                let code = body["code"].as_str().unwrap();
+                let verifier = body["code_verifier"].as_str().unwrap();
+                let Some(challenge) = s.server().codes.remove(code) else {
+                    return (StatusCode::BAD_REQUEST, axum::Json(json!({"detail": "invalid or expired code"})))
+                        .into_response();
+                };
+                if URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes())) != challenge {
+                    return (StatusCode::BAD_REQUEST, axum::Json(json!({"detail": "invalid code_verifier"})))
+                        .into_response();
+                }
+                s.server().sessions.insert(KEY.to_string());
+                let user = me_json();
+                axum::Json(json!({
+                    "session_key": KEY,
+                    "expires_at": 4102444800i64,
+                    "user": {"id": user["id"], "display_name": user["display_name"],
+                             "email": null, "role": "user"},
+                }))
+                .into_response()
             }),
         )
         .route(
-            "/api/files/song/id/{id}",
+            "/api/auth/client/logout",
+            post(|State(s): State<AppState>, headers: HeaderMap| async move {
+                if let Err(status) = s.authorized(&headers) {
+                    return status.into_response();
+                }
+                s.server().sessions.clear();
+                StatusCode::NO_CONTENT.into_response()
+            }),
+        )
+        .route(
+            "/api/me",
+            get(|State(s): State<AppState>, headers: HeaderMap| async move {
+                s.authorized(&headers).map(|_| axum::Json(me_json()))
+            }),
+        )
+        // ---- 사전 다운로드 ----
+        .route(
+            "/api/pre/charthash",
+            get(|State(s): State<AppState>, headers: HeaderMap| async move {
+                s.authorized(&headers)?;
+                Ok::<_, StatusCode>(axum::Json(hashes(&s.server().chart_chunks)))
+            }),
+        )
+        .route(
+            "/api/pre/manifest/hash",
+            get(|State(s): State<AppState>, headers: HeaderMap| async move {
+                s.authorized(&headers)?;
+                Ok::<_, StatusCode>(axum::Json(hashes(&s.server().manifests)))
+            }),
+        )
+        .route(
+            "/api/pre/manifest/{id}",
             get(|State(s): State<AppState>, Path(id): Path<u32>, headers: HeaderMap| async move {
-                let data = s.server.lock().unwrap().songs[&id].clone();
-                blob(&headers, &data, &s.counters)
+                s.authorized(&headers)?;
+                s.counters.manifest.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, StatusCode>(s.server().manifests[&id].clone())
+            }),
+        )
+        .route(
+            "/api/pre/chart/{id}",
+            get(|State(s): State<AppState>, Path(id): Path<u32>, headers: HeaderMap| async move {
+                s.authorized(&headers)?;
+                s.counters.chart_chunk.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, StatusCode>(s.server().chart_chunks[&id].clone())
+            }),
+        )
+        .route(
+            "/api/pre/song/{id}/file",
+            get(
+                |State(s): State<AppState>,
+                 Path(id): Path<u32>,
+                 Query(q): Query<HashMap<String, String>>,
+                 headers: HeaderMap| async move {
+                    s.authorized(&headers)?;
+                    s.counters.pre_file.fetch_add(1, Ordering::SeqCst);
+                    let path = &q["path"];
+                    let server = s.server();
+                    if !server.pre_paths.contains(path) {
+                        return Err(StatusCode::FORBIDDEN);
+                    }
+                    let mut zip = zip::ZipArchive::new(Cursor::new(&server.songs[&id])).unwrap();
+                    let mut data = Vec::new();
+                    zip.by_name(path).unwrap().read_to_end(&mut data).unwrap();
+                    Ok(data)
+                },
+            ),
+        )
+        // ---- 플레이 다운로드 ----
+        .route(
+            "/api/play/song/{id}",
+            get(|State(s): State<AppState>, Path(id): Path<u32>, headers: HeaderMap| async move {
+                if let Err(status) = s.authorized(&headers) {
+                    return status.into_response();
+                }
+                s.counters.play.fetch_add(1, Ordering::SeqCst);
+                let mut server = s.server();
+                if server.tickets == 0 {
+                    return (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [(header::RETRY_AFTER, "30")],
+                        axum::Json(json!({"detail": "no download ticket"})),
+                    )
+                        .into_response();
+                }
+                server.tickets -= 1;
+                server.songs[&id].clone().into_response()
             }),
         )
         .with_state(state);
@@ -121,6 +239,8 @@ struct Fixture {
     files: Vec<(&'static str, Vec<u8>)>,
 }
 
+const PRE_FILES: &[&str] = &["_7a.bme", "banner.png", "preview.ogg"];
+
 fn noise(seed: u8, n: usize) -> Vec<u8> {
     (0..n)
         .map(|i| (i as u8).wrapping_mul(seed).wrapping_add(seed))
@@ -128,15 +248,16 @@ fn noise(seed: u8, n: usize) -> Vec<u8> {
 }
 
 fn fixture() -> Fixture {
-    let chart_a = b"#TITLE Test\r\n#ARTIST Someone\r\n#WAV01 bgm01.wav\r\n".to_vec();
+    let chart_a =
+        b"#TITLE Test\r\n#ARTIST Someone\r\n#BANNER banner.png\r\n#WAV01 bgm01.wav\r\n".to_vec();
     let chart_b = b"#TITLE Test [ANOTHER]\r\n".to_vec();
     Fixture {
         files: vec![
             ("_7a.bme", chart_a.clone()),
             ("bgm01.wav", noise(3, 50_000)),
             ("bgm02.wav", noise(5, 40_000)),
-            ("bgm03.wav", noise(7, 30_000)),
             ("banner.png", noise(11, 5_000)),
+            ("preview.ogg", noise(17, 8_000)),
             ("bga/movie.mp4", noise(13, 60_000)),
         ],
         chart_a,
@@ -180,6 +301,11 @@ fn entries(zip_bytes: &[u8]) -> Vec<FileEntry> {
                 } else {
                     8
                 },
+                kind: if PRE_FILES.contains(&f.name()) {
+                    FileKind::Pre
+                } else {
+                    FileKind::Play
+                },
             }
         })
         .collect()
@@ -190,10 +316,12 @@ struct Env {
     state: AppState,
     client: Client,
     fixture: Fixture,
+    url: String,
     _dir: tempfile::TempDir,
 }
 
-fn setup() -> Env {
+/// `logged_in`이면 클라이언트가 유효한 세션키를 갖고 시작한다.
+fn setup(logged_in: bool) -> Env {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -212,7 +340,11 @@ fn setup() -> Env {
         files: entries(&zip),
     }];
 
-    let mut server = Server::default();
+    let mut server = Server {
+        tickets: 5,
+        pre_paths: PRE_FILES.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    };
     server.chart_chunks.insert(
         0,
         chart_chunk(&[
@@ -224,6 +356,7 @@ fn setup() -> Env {
         .manifests
         .insert(0, serde_json::to_vec(&manifest).unwrap());
     server.songs.insert(1, zip);
+    server.sessions.insert(KEY.to_string());
 
     let state = AppState {
         server: Arc::new(Mutex::new(server)),
@@ -231,36 +364,114 @@ fn setup() -> Env {
     };
     let url = spawn_server(&rt, state.clone());
     let dir = tempfile::tempdir().unwrap();
-    let mut opts = Options::new(url, dir.path());
-    opts.promote_after = 3;
+    let mut opts = Options::new(&url, dir.path());
+    opts.session = logged_in.then(|| KEY.to_string());
     let client = Client::open(&opts).unwrap();
     Env {
         rt,
         state,
         client,
         fixture,
+        url,
         _dir: dir,
     }
 }
 
+impl Env {
+    fn want(&self, name: &str) -> Vec<u8> {
+        self.fixture
+            .files
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap()
+            .1
+            .clone()
+    }
+}
+
 /// 가상 FS 백엔드처럼 런타임 밖 스레드에서 작은 단위로 읽는다.
-fn read_all(fs: &EbmsFs, path: &str) -> Vec<u8> {
+fn read_all(fs: &EbmsFs, path: &str) -> ebms_core::Result<Vec<u8>> {
     let attr = fs.resolve(path).unwrap_or_else(|| panic!("missing {path}"));
     assert_eq!(attr.kind, Kind::File);
     let mut out = Vec::new();
     while (out.len() as u64) < attr.size {
-        let buf = fs.read(attr.ino, out.len() as u64, 7_000).unwrap();
+        let buf = fs.read(attr.ino, out.len() as u64, 7_000)?;
         assert!(!buf.is_empty());
         out.extend(buf);
     }
-    out
+    Ok(out)
 }
 
 const SONG: &str = "00001 Artist - Title";
 
 #[test]
+fn browser_login_gets_session_key_and_logout_revokes_it() {
+    let env = setup(false);
+    env.state.server().sessions.clear();
+    let api = Api::new(&env.url).unwrap();
+    assert!(api.needs_login());
+
+    let token = env.rt.block_on(async {
+        let req = LoginRequest::start(&api, "test device").await.unwrap();
+        // 브라우저 대신: 로그인 주소를 열면 서버가 루프백 주소로 리다이렉트한다.
+        let browser = tokio::spawn({
+            let url = req.url().to_string();
+            async move {
+                let resp = reqwest::get(url).await.unwrap();
+                assert!(resp.url().as_str().starts_with("http://127.0.0.1:"));
+                assert_eq!(resp.status(), 200);
+                resp.text().await.unwrap()
+            }
+        });
+        let token = req.finish(&api, Duration::from_secs(10)).await.unwrap();
+        assert!(browser.await.unwrap().contains("로그인 완료"));
+        token
+    });
+    assert_eq!(token.session_key, KEY);
+    assert_eq!(token.user.display_name, "Tester");
+    assert!(!api.needs_login());
+
+    let me = env.rt.block_on(api.me()).unwrap();
+    assert_eq!(me.tickets.available, 5);
+    assert_eq!(me.oauths[0].oauth, "google");
+
+    env.rt.block_on(api.logout()).unwrap();
+    assert!(env.state.server().sessions.is_empty());
+    assert!(api.needs_login());
+}
+
+#[test]
+fn reused_code_is_rejected() {
+    let env = setup(false);
+    let api = Api::new(&env.url).unwrap();
+    let err = env
+        .rt
+        .block_on(api.exchange_code("never-issued", "x".repeat(43).as_str()))
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Auth(ref d) if d.contains("invalid")),
+        "{err}"
+    );
+}
+
+#[test]
+fn requests_without_session_are_unauthorized() {
+    let env = setup(false);
+    let err = env.rt.block_on(env.client.sync()).unwrap_err();
+    assert!(matches!(err, Error::Unauthorized), "{err}");
+    assert!(env.client.api.needs_login());
+
+    // 서버가 세션을 폐기한 경우도 같다.
+    let env = setup(true);
+    env.state.server().sessions.clear();
+    let err = env.rt.block_on(env.client.sync()).unwrap_err();
+    assert!(matches!(err, Error::Unauthorized), "{err}");
+    assert!(env.client.api.needs_login());
+}
+
+#[test]
 fn sync_is_incremental() {
-    let env = setup();
+    let env = setup(true);
     let first = env.rt.block_on(env.client.sync()).unwrap();
     assert_eq!(first.chart_chunks_updated, vec![0]);
     assert_eq!(first.manifest_chunks_updated, vec![0]);
@@ -274,9 +485,7 @@ fn sync_is_incremental() {
     let new_chart = b"#TITLE New\r\n".to_vec();
     let sha_new = sha(&new_chart);
     env.state
-        .server
-        .lock()
-        .unwrap()
+        .server()
         .chart_chunks
         .insert(1, chart_chunk(&[(&format!("{sha_new}.bms"), &new_chart)]));
     let third = env.rt.block_on(env.client.sync()).unwrap();
@@ -287,7 +496,7 @@ fn sync_is_incremental() {
 
 #[test]
 fn tree_and_chart_reads_need_no_download() {
-    let env = setup();
+    let env = setup(true);
     env.rt.block_on(env.client.sync()).unwrap();
     let fs = env.client.fs(env.rt.handle().clone()).unwrap();
 
@@ -303,11 +512,11 @@ fn tree_and_chart_reads_need_no_download() {
     }
 
     assert_eq!(
-        read_all(&fs, &format!("{SONG}/_7a.bme")),
+        read_all(&fs, &format!("{SONG}/_7a.bme")).unwrap(),
         env.fixture.chart_a
     );
     assert_eq!(
-        read_all(&fs, &format!("{SONG}/{linked}")),
+        read_all(&fs, &format!("{SONG}/{linked}")).unwrap(),
         env.fixture.chart_b
     );
     assert_eq!(
@@ -317,80 +526,89 @@ fn tree_and_chart_reads_need_no_download() {
 
     let c = &env.state.counters;
     assert_eq!(
-        c.song_full.load(Ordering::SeqCst) + c.song_range.load(Ordering::SeqCst),
+        c.play.load(Ordering::SeqCst) + c.pre_file.load(Ordering::SeqCst),
         0
     );
 }
 
 #[test]
-fn light_files_use_range_and_heavy_files_promote_to_full_song() {
-    let env = setup();
+fn pre_files_alone_and_play_files_as_whole_song() {
+    let env = setup(true);
     env.rt.block_on(env.client.sync()).unwrap();
     let fs = env.client.fs(env.rt.handle().clone()).unwrap();
     let c = &env.state.counters;
-    let want = |name: &str| {
-        env.fixture
-            .files
-            .iter()
-            .find(|(n, _)| *n == name)
-            .unwrap()
-            .1
-            .clone()
-    };
 
-    // 배너: 파일 단위
-    assert_eq!(
-        read_all(&fs, &format!("{SONG}/banner.png")),
-        want("banner.png")
-    );
-    assert_eq!(c.song_full.load(Ordering::SeqCst), 0);
-    assert!(c.song_range.load(Ordering::SeqCst) >= 1);
+    // 배너·프리뷰: 사전 API로 그 파일만, 티켓 없이
+    for name in ["banner.png", "preview.ogg"] {
+        assert_eq!(
+            read_all(&fs, &format!("{SONG}/{name}")).unwrap(),
+            env.want(name)
+        );
+    }
+    assert_eq!(c.pre_file.load(Ordering::SeqCst), 2);
+    assert_eq!(c.play.load(Ordering::SeqCst), 0);
+    assert_eq!(env.state.server().tickets, 5);
 
-    // 대소문자가 다른 이름으로 요청해도 같은 파일
+    // 키음을 처음 열면 곡 zip 전체 (대소문자가 다른 이름도 같은 파일)
     assert_eq!(
-        read_all(&fs, &format!("{SONG}/BGM01.WAV")),
-        want("bgm01.wav")
+        read_all(&fs, &format!("{SONG}/BGM01.WAV")).unwrap(),
+        env.want("bgm01.wav")
     );
-    assert_eq!(
-        read_all(&fs, &format!("{SONG}/bgm02.wav")),
-        want("bgm02.wav")
-    );
-    assert_eq!(c.song_full.load(Ordering::SeqCst), 0);
+    assert_eq!(c.play.load(Ordering::SeqCst), 1);
+    assert_eq!(env.state.server().tickets, 4);
 
-    // 세 번째 무거운 파일에서 곡 전체 다운로드
-    assert_eq!(
-        read_all(&fs, &format!("{SONG}/bgm03.wav")),
-        want("bgm03.wav")
-    );
-    assert_eq!(c.song_full.load(Ordering::SeqCst), 1);
+    // 나머지 플레이 파일은 캐시에서
+    for name in ["bgm02.wav", "bga/movie.mp4"] {
+        assert_eq!(
+            read_all(&fs, &format!("{SONG}/{name}")).unwrap(),
+            env.want(name)
+        );
+    }
+    assert_eq!(c.play.load(Ordering::SeqCst), 1);
+    assert_eq!(c.pre_file.load(Ordering::SeqCst), 2);
+}
 
-    // 이후는 캐시에서
-    let before = c.song_range.load(Ordering::SeqCst);
+#[test]
+fn no_ticket_pauses_the_song_until_retry_after() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    env.state.server().tickets = 0;
+
+    let path = format!("{SONG}/bgm01.wav");
+    let err = read_all(&fs, &path).unwrap_err();
+    assert!(matches!(err, Error::NoTicket { retry_after: 30 }), "{err}");
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+
+    // Retry-After 동안은 서버에 다시 묻지 않는다. 사전 파일은 그대로 받는다.
+    env.state.server().tickets = 5;
+    let err = read_all(&fs, &format!("{SONG}/bgm02.wav")).unwrap_err();
+    assert!(matches!(err, Error::NoTicket { .. }), "{err}");
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
     assert_eq!(
-        read_all(&fs, &format!("{SONG}/bga/movie.mp4")),
-        want("bga/movie.mp4")
+        read_all(&fs, &format!("{SONG}/banner.png")).unwrap(),
+        env.want("banner.png")
     );
-    assert_eq!(c.song_range.load(Ordering::SeqCst), before);
-    assert_eq!(c.song_full.load(Ordering::SeqCst), 1);
 }
 
 #[test]
 fn changed_song_on_server_is_an_error_not_wrong_bytes() {
-    let env = setup();
+    let env = setup(true);
     env.rt.block_on(env.client.sync()).unwrap();
     let fs = env.client.fs(env.rt.handle().clone()).unwrap();
 
     // 매니페스트가 갱신되기 전에 서버 zip만 바뀐 상황
     let mut files = env.fixture.files.clone();
-    files[4].1 = vec![0u8; 5_000];
-    env.state
-        .server
-        .lock()
-        .unwrap()
-        .songs
-        .insert(1, song_zip(&files));
+    files[1].1 = vec![0u8; 50_000];
+    files[3].1 = vec![0u8; 5_000];
+    env.state.server().songs.insert(1, song_zip(&files));
 
-    let attr = fs.resolve(&format!("{SONG}/banner.png")).unwrap();
-    assert!(fs.read(attr.ino, 0, 100).is_err());
-    assert_eq!(env.state.counters.song_full.load(Ordering::SeqCst), 1); // 200 응답을 받았지만 본문은 쓰지 않음
+    assert!(matches!(
+        read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap_err(),
+        Error::Integrity(_)
+    ));
+    assert!(matches!(
+        read_all(&fs, &format!("{SONG}/banner.png")).unwrap_err(),
+        Error::Integrity(_)
+    ));
 }
