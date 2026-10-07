@@ -3,7 +3,7 @@
 //! 한 사용자가 여러 EBMS 서버에 로그인한다. 계정·세션키·로컬 데이터는 서버마다 따로다.
 //!
 //! ```text
-//! <앱 데이터>/config.toml                      servers = [{id, url, name}]
+//! <앱 데이터>/config.toml                      mount_point, servers = [{id, url, name}]
 //! <앱 데이터>/servers/<server_id>/index.sqlite  서버별 로컬 데이터 (paths::Paths)
 //! <앱 데이터>/servers/<server_id>/session       세션키 (키체인을 못 쓸 때만)
 //! ```
@@ -17,6 +17,9 @@ use crate::{Error, Result};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
+    /// 가상 드라이브를 마운트할 곳. 없으면 앱 기본값.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount_point: Option<PathBuf>,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
 }

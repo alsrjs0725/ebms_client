@@ -15,7 +15,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ebms_core::api::Api;
 use ebms_core::auth::LoginRequest;
-use ebms_core::fs::{EbmsFs, Kind};
+use ebms_core::config::AppDir;
+use ebms_core::fs::{Kind, ReadOnlyFs};
+use ebms_core::hub::Hub;
 use ebms_core::manifest::{FileEntry, FileKind, SongManifest};
 use ebms_core::{Client, Error, Options};
 use serde_json::json;
@@ -320,12 +322,8 @@ struct Env {
     _dir: tempfile::TempDir,
 }
 
-/// `logged_in`이면 클라이언트가 유효한 세션키를 갖고 시작한다.
-fn setup(logged_in: bool) -> Env {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+/// 곡 하나가 있는 서버 상태. 세션키 `KEY`는 이미 유효하다.
+fn server_state() -> (AppState, Fixture) {
     let fixture = fixture();
     let zip = song_zip(&fixture.files);
     let sha_a = sha(&fixture.chart_a);
@@ -362,6 +360,20 @@ fn setup(logged_in: bool) -> Env {
         server: Arc::new(Mutex::new(server)),
         counters: Arc::default(),
     };
+    (state, fixture)
+}
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+/// `logged_in`이면 클라이언트가 유효한 세션키를 갖고 시작한다.
+fn setup(logged_in: bool) -> Env {
+    let rt = runtime();
+    let (state, fixture) = server_state();
     let url = spawn_server(&rt, state.clone());
     let dir = tempfile::tempdir().unwrap();
     let mut opts = Options::new(&url, dir.path());
@@ -390,7 +402,7 @@ impl Env {
 }
 
 /// 가상 FS 백엔드처럼 런타임 밖 스레드에서 작은 단위로 읽는다.
-fn read_all(fs: &EbmsFs, path: &str) -> ebms_core::Result<Vec<u8>> {
+fn read_all(fs: &dyn ReadOnlyFs, path: &str) -> ebms_core::Result<Vec<u8>> {
     let attr = fs.resolve(path).unwrap_or_else(|| panic!("missing {path}"));
     assert_eq!(attr.kind, Kind::File);
     let mut out = Vec::new();
@@ -611,4 +623,90 @@ fn changed_song_on_server_is_an_error_not_wrong_bytes() {
         read_all(&fs, &format!("{SONG}/banner.png")).unwrap_err(),
         Error::Integrity(_)
     ));
+}
+
+/// 브라우저 대신 로그인 주소를 열어 루프백 리다이렉트까지 따라간다.
+fn fake_browser(url: &str) {
+    let url = url.to_string();
+    tokio::spawn(async move {
+        let resp = reqwest::get(url).await.unwrap();
+        assert_eq!(resp.status(), 200);
+    });
+}
+
+#[test]
+fn several_servers_show_as_top_level_folders() {
+    let rt = runtime();
+    let (state_a, fixture) = server_state();
+    let (state_b, _) = server_state();
+    state_a.server().sessions.clear();
+    state_b.server().sessions.clear();
+    let url_a = spawn_server(&rt, state_a.clone());
+    let url_b = spawn_server(&rt, state_b.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
+    let banner = fixture
+        .files
+        .iter()
+        .find(|(n, _)| *n == "banner.png")
+        .unwrap();
+
+    let (a, b) = rt.block_on(async {
+        let a = hub.add(&url_a, Some("Server A")).await.unwrap();
+        let b = hub.add(&url_b, Some("Server B")).await.unwrap();
+        assert!(hub.add(&url_a, None).await.is_err(), "same url twice");
+        assert!(hub.me(&a.entry.id).await.unwrap().is_none());
+        for s in [&a, &b] {
+            let user = hub
+                .login(&s.entry.id, "test", Duration::from_secs(10), fake_browser)
+                .await
+                .unwrap();
+            assert_eq!(user.display_name, "Tester");
+        }
+        hub.sync_all().await;
+        (a, b)
+    });
+    assert!(a.sync_status().last_ok_at.is_some());
+    // 키체인 대신 서버별 폴더의 session 파일에 저장됨
+    assert!(hub.app_dir().server_dir(&a.entry).join("session").exists());
+
+    let drive = hub.drive();
+    let names: Vec<String> = drive
+        .readdir(ebms_core::tree::ROOT)
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, ["Server A", "Server B"]);
+    for server in ["Server A", "Server B"] {
+        let path = format!("{server}/{SONG}/banner.png");
+        assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
+    }
+
+    // 서버 A의 세션이 만료돼도 B는 그대로 동작한다.
+    state_a.server().sessions.clear();
+    rt.block_on(hub.sync_all());
+    assert!(a.sync_status().last_error.is_some());
+    assert!(a.api().needs_login());
+    assert!(b.sync_status().last_error.is_none());
+    let path = format!("Server B/{SONG}/bgm01.wav");
+    assert_eq!(read_all(drive.as_ref(), &path).unwrap(), fixture.files[1].1);
+    // 받아 둔 파일은 로그인 없이도 읽힌다.
+    let path = format!("Server A/{SONG}/banner.png");
+    assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
+
+    // 삭제하면 로그아웃하고 드라이브에서 빠진다. 설정 파일에도 남지 않는다.
+    rt.block_on(hub.remove(&b.entry.id)).unwrap();
+    assert!(state_b.server().sessions.is_empty());
+    assert!(drive.resolve("Server B").is_none());
+    assert!(drive.resolve("Server A").is_some());
+    let config = AppDir::new(dir.path()).load_config().unwrap();
+    assert_eq!(config.servers.len(), 1);
+    assert_eq!(config.servers[0].name, "Server A");
+
+    // 다시 열면 남은 서버만
+    drop(hub);
+    let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
+    assert_eq!(hub.servers().len(), 1);
+    assert!(hub.drive().resolve(&format!("Server A/{SONG}")).is_some());
 }
