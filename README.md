@@ -45,7 +45,7 @@ Linux 마운트에는 FUSE(`/dev/fuse`, `fuse3` 패키지)가 필요합니다.
 
 ## 릴리스
 
-`develop` → `stage` → `main` 순서로 병합합니다. `stage`에 병합하면 [Releases](https://github.com/alsrjs0725/ebms_client/releases)의 사전 릴리스 `stage`가 새 빌드로 바뀌고, `main`에 병합하면 정식 릴리스 `v<버전>`이 만들어집니다(Windows `.zip`, Linux `.tar.gz`). 정식 릴리스 전에 `Cargo.toml`의 `workspace.package.version`을 올려야 하며, 같은 버전이 이미 있으면 실패합니다.
+`develop` → `stage` → `release` 순서로 병합합니다. `stage`에 병합하면 [Releases](https://github.com/alsrjs0725/ebms_client/releases)의 사전 릴리스 `stage`가 새 빌드로 바뀌고, `release`에 병합하면 정식 릴리스 `v<버전>`이 만들어집니다(Windows `.zip`, Linux `.tar.gz`). 정식 릴리스 전에 `Cargo.toml`의 `workspace.package.version`을 올려야 하며, 같은 버전이 이미 있으면 실패합니다.
 
 ## 개발
 

@@ -1,9 +1,9 @@
 name: Release
 
-# main(release) 병합 시 정식 릴리스 v<버전>, stage 병합 시 사전 릴리스 `stage`를 갱신
+# release 병합 시 정식 릴리스 v<버전>, stage 병합 시 사전 릴리스 `stage`를 갱신
 on:
   push:
-    branches: [main, stage]
+    branches: [release, stage]
   workflow_dispatch:
 
 concurrency:
@@ -65,7 +65,7 @@ jobs:
         run: |
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml)
           notes="커밋 ${GITHUB_SHA::7} (${GITHUB_REF_NAME}). Linux 실행에는 libwebkit2gtk-4.1, fuse3 패키지가 필요합니다."
-          if [ "$GITHUB_REF_NAME" = "main" ]; then
+          if [ "$GITHUB_REF_NAME" = "release" ]; then
             tag="v$version"
             if gh release view "$tag" >/dev/null 2>&1; then
               echo "::error::$tag 릴리스가 이미 있습니다. Cargo.toml의 workspace 버전을 올린 뒤 병합하세요."
