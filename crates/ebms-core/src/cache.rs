@@ -19,6 +19,7 @@ pub struct Cache {
     index: Arc<Index>,
     limit: u64,
     touched: Mutex<HashMap<(u32, String), i64>>,
+    evict_lock: Mutex<()>,
 }
 
 impl Cache {
@@ -29,6 +30,7 @@ impl Cache {
             index,
             limit,
             touched: Mutex::new(HashMap::new()),
+            evict_lock: Mutex::new(()),
         }
     }
 
@@ -96,6 +98,7 @@ impl Cache {
 
     /// 오래된 항목부터 `limit` 이하가 될 때까지 지운다.
     fn evict_to(&self, limit: u64) -> Result<u64> {
+        let _guard = self.evict_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut total = self.index.cache_total()?;
         let mut freed = 0;
         while total > limit {
@@ -105,16 +108,17 @@ impl Cache {
                 if total <= limit {
                     break;
                 }
-                if let Ok(path) = self.path(row.song_id, &row.path)
-                    && let Err(e) = std::fs::remove_file(&path)
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    warn!(?path, %e, "cache eviction failed");
-                    continue;
+                if let Ok(path) = self.path(row.song_id, &row.path) {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        if e.kind() != std::io::ErrorKind::NotFound {
+                            warn!(?path, %e, "cache eviction failed");
+                        }
+                    } else {
+                        freed += row.size;
+                    }
                 }
                 self.index.cache_remove(row.song_id, &row.path)?;
                 total = total.saturating_sub(row.size);
-                freed += row.size;
                 progressed = true;
             }
             // 지울 게 없거나 모두 실패하면 같은 후보만 다시 나오므로 멈춘다.
@@ -166,4 +170,50 @@ fn unique() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static N: AtomicU64 = AtomicU64::new(0);
     N.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_evict_handles_unremovable_file() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path().join("cache");
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&tmp)?;
+
+        let index_path = dir.path().join("index.db");
+        let index = Arc::new(Index::open(&index_path)?);
+
+        let cache = Cache::new(root.clone(), tmp, index.clone(), 0);
+
+        // Put a file in the cache
+        cache.put(1, "test.txt", b"hello world")?;
+        assert_eq!(cache.total()?, 11);
+
+        // Make the song directory read-only so remove_file fails on Unix systems
+        let song_dir = root.join("1");
+        let mut permissions = std::fs::metadata(&song_dir)?.permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&song_dir, permissions.clone())?;
+
+        let start = std::time::Instant::now();
+        // evict() with limit 0 should finish quickly without looping infinitely
+        let freed = cache.evict()?;
+        let elapsed = start.elapsed();
+
+        // Restore permissions so cleanup works
+        permissions.set_readonly(false);
+        let _ = std::fs::set_permissions(&song_dir, permissions);
+
+        assert!(elapsed < std::time::Duration::from_secs(2));
+        // Item should be removed from index even though file deletion failed
+        assert_eq!(cache.total()?, 0);
+        assert_eq!(freed, 0);
+
+        Ok(())
+    }
 }
