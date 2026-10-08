@@ -16,7 +16,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ebms_core::api::Api;
 use ebms_core::auth::LoginRequest;
 use ebms_core::config::AppDir;
-use ebms_core::fs::{Kind, ReadOnlyFs};
+use ebms_core::fs::{Caller, Kind, ReadOnlyFs, Trusted};
 use ebms_core::hub::Hub;
 use ebms_core::manifest::{FileEntry, FileKind, SongManifest};
 use ebms_core::{Client, Error, Options};
@@ -401,13 +401,17 @@ impl Env {
     }
 }
 
-/// 가상 FS 백엔드처럼 런타임 밖 스레드에서 작은 단위로 읽는다.
+/// 가상 FS 백엔드처럼 런타임 밖 스레드에서 작은 단위로 읽는다. 구동기가 읽는 것으로 본다.
 fn read_all(fs: &dyn ReadOnlyFs, path: &str) -> ebms_core::Result<Vec<u8>> {
+    read_all_as(fs, path, &Trusted("test"))
+}
+
+fn read_all_as(fs: &dyn ReadOnlyFs, path: &str, caller: &dyn Caller) -> ebms_core::Result<Vec<u8>> {
     let attr = fs.resolve(path).unwrap_or_else(|| panic!("missing {path}"));
     assert_eq!(attr.kind, Kind::File);
     let mut out = Vec::new();
     while (out.len() as u64) < attr.size {
-        let buf = fs.read(attr.ino, out.len() as u64, 7_000)?;
+        let buf = fs.read(attr.ino, out.len() as u64, 7_000, caller)?;
         assert!(!buf.is_empty());
         out.extend(buf);
     }
@@ -578,6 +582,48 @@ fn pre_files_alone_and_play_files_as_whole_song() {
     }
     assert_eq!(c.play.load(Ordering::SeqCst), 1);
     assert_eq!(c.pre_file.load(Ordering::SeqCst), 2);
+}
+
+/// 백업·인덱서처럼 구동기가 아닌 프로그램.
+struct Indexer;
+
+impl Caller for Indexer {
+    fn name(&self) -> String {
+        "indexer".into()
+    }
+    fn is_player(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn non_player_reads_never_download_the_song() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    let c = &env.state.counters;
+
+    // 플레이 파일 16바이트만 읽어도 거절하고 티켓을 쓰지 않는다.
+    let attr = fs.resolve(&format!("{SONG}/bga/movie.mp4")).unwrap();
+    let err = fs.read(attr.ino, 0, 16, &Indexer).unwrap_err();
+    assert!(matches!(err, Error::NotPlayer { .. }), "{err}");
+    assert_eq!(c.play.load(Ordering::SeqCst), 0);
+    assert_eq!(env.state.server().tickets, 5);
+
+    // 사전 파일과 차트는 그대로 읽힌다.
+    assert_eq!(
+        read_all_as(&fs, &format!("{SONG}/banner.png"), &Indexer).unwrap(),
+        env.want("banner.png")
+    );
+
+    // 구동기가 받은 뒤에는 캐시에서 누구나 읽는다.
+    read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap();
+    assert_eq!(
+        read_all_as(&fs, &format!("{SONG}/bga/movie.mp4"), &Indexer).unwrap(),
+        env.want("bga/movie.mp4")
+    );
+    assert_eq!(c.play.load(Ordering::SeqCst), 1);
+    assert_eq!(env.state.server().tickets, 4);
 }
 
 #[test]

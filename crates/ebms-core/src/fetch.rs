@@ -2,6 +2,7 @@
 //!
 //! - 사전 파일(배너·프리뷰 등)은 사전 API로 그 파일만 받는다.
 //! - 플레이 파일(키음·BGA 등)을 처음 열면 플레이 API로 곡 zip 전체를 받는다(티켓 1개).
+//!   구동기가 아닌 프로그램의 읽기는 받지 않고 거절한다.
 //! - 티켓이 없어 `429`를 받으면 `Retry-After` 동안 그 곡의 플레이 다운로드를 다시 요청하지 않는다.
 //! - 같은 파일·곡을 동시에 요청하면 한 번만 받는다.
 
@@ -15,6 +16,7 @@ use tracing::{info, warn};
 
 use crate::api::Api;
 use crate::cache::Cache;
+use crate::fs::Caller;
 use crate::manifest::{FileEntry, FileKind};
 use crate::paths::Paths;
 use crate::tree::SongInfo;
@@ -51,13 +53,29 @@ impl Fetcher {
     }
 
     /// 파일이 캐시에 있도록 하고 경로를 돌려준다.
-    pub async fn ensure(&self, song: &SongInfo, entry: &FileEntry) -> Result<PathBuf> {
+    /// 플레이 파일이 캐시에 없으면 `caller`가 구동기일 때만 곡 전체를 받는다.
+    pub async fn ensure(
+        &self,
+        song: &SongInfo,
+        entry: &FileEntry,
+        caller: &dyn Caller,
+    ) -> Result<PathBuf> {
         if let Some(p) = self.cache.get(song.song_id, &entry.path)? {
             return Ok(p);
         }
 
         if entry.kind == FileKind::Play {
-            self.ensure_song(song).await?;
+            if !caller.is_player() {
+                let program = caller.name();
+                info!(
+                    song_id = song.song_id,
+                    program,
+                    path = entry.path,
+                    "play file read by a non-player, refused"
+                );
+                return Err(Error::NotPlayer { program });
+            }
+            self.ensure_song(song, &caller.name()).await?;
             return self.cache.get(song.song_id, &entry.path)?.ok_or_else(|| {
                 Error::Integrity(format!(
                     "song {}: {} not in song zip",
@@ -78,8 +96,8 @@ impl Fetcher {
         Ok(path)
     }
 
-    /// 곡 zip 전체를 받아 모든 파일을 캐시에 넣는다.
-    pub async fn ensure_song(&self, song: &SongInfo) -> Result<()> {
+    /// 곡 zip 전체를 받아 모든 파일을 캐시에 넣는다. `program`은 로그용 요청 프로그램.
+    pub async fn ensure_song(&self, song: &SongInfo, program: &str) -> Result<()> {
         self.check_backoff(song.song_id)?;
         let lock = self.lock(Key::Song(song.song_id));
         let _guard = lock.lock().await;
@@ -96,7 +114,8 @@ impl Fetcher {
         info!(
             song_id = song.song_id,
             size = song.zip_size,
-            "downloading whole song"
+            program,
+            "downloading whole song (uses a ticket)"
         );
         let tmp = self.paths.tmp_file(&format!("song_{}", song.song_id));
         let result = async {

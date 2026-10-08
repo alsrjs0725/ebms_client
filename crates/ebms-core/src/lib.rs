@@ -11,6 +11,7 @@
 //! - [`cache`]: 받은 에셋 캐시
 //! - [`fs`]: OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템
 //! - [`drive`]: 여러 서버를 서버별 최상위 폴더로 합친 가상 드라이브
+//! - [`players`]: BMS 구동기 판별. 곡 전체 다운로드는 구동기만 일으킨다
 //! - [`hub`]: 등록된 서버 전체 (추가·삭제, 로그인, 동기화). 상주 앱이 쓴다
 
 pub mod api;
@@ -26,6 +27,7 @@ pub mod hub;
 pub mod index;
 pub mod manifest;
 pub mod paths;
+pub mod players;
 pub mod session;
 pub mod sync;
 pub mod tree;

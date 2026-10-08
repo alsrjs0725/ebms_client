@@ -34,6 +34,28 @@ pub struct DirEntry {
     pub kind: Kind,
 }
 
+/// 읽기를 요청한 프로그램. 곡 전체 다운로드(티켓 1개)가 필요할 때만 묻는다.
+pub trait Caller: Sync {
+    /// 로그에 남길 이름 (예: `java[1234]`)
+    fn name(&self) -> String;
+    /// BMS 구동기인지. 구동기만 곡 전체 다운로드를 일으킬 수 있다.
+    /// 백업·인덱서·썸네일러가 플레이 파일을 몇 바이트 읽는 것만으로 티켓을 쓰지 않도록.
+    fn is_player(&self) -> bool;
+}
+
+/// CLI `cat`처럼 사용자가 직접 요청한 읽기. 구동기로 취급한다.
+pub struct Trusted(pub &'static str);
+
+impl Caller for Trusted {
+    fn name(&self) -> String {
+        self.0.to_string()
+    }
+
+    fn is_player(&self) -> bool {
+        true
+    }
+}
+
 /// OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템. 서버 하나([`EbmsFs`])와
 /// 여러 서버를 합친 드라이브([`crate::drive::Drive`])가 구현한다.
 pub trait ReadOnlyFs: Send + Sync {
@@ -42,7 +64,8 @@ pub trait ReadOnlyFs: Send + Sync {
     fn parent(&self, ino: Ino) -> Option<Ino>;
     fn readdir(&self, ino: Ino) -> Option<Vec<DirEntry>>;
     /// `offset`부터 최대 `size` 바이트를 읽는다. 필요하면 다운로드를 기다린다.
-    fn read(&self, ino: Ino, offset: u64, size: u32) -> Result<Vec<u8>>;
+    /// 곡 전체 다운로드는 `caller`가 구동기일 때만 한다.
+    fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>>;
 
     /// `/`(또는 `\`)로 구분한 경로로 찾는다. 빈 문자열은 루트.
     fn resolve(&self, path: &str) -> Option<Attr> {
@@ -123,7 +146,7 @@ impl ReadOnlyFs for EbmsFs {
         )
     }
 
-    fn read(&self, ino: Ino, offset: u64, size: u32) -> Result<Vec<u8>> {
+    fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>> {
         let tree = self.tree();
         let Some(Node::File {
             size: file_size,
@@ -155,7 +178,7 @@ impl ReadOnlyFs for EbmsFs {
                 let entry = entry.clone();
                 let path = self
                     .rt
-                    .block_on(async move { fetcher.ensure(&song, &entry).await })?;
+                    .block_on(async move { fetcher.ensure(&song, &entry, caller).await })?;
                 read_at(&path, offset, len)
             }
         }

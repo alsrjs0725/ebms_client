@@ -3,7 +3,7 @@
 //! 한 사용자가 여러 EBMS 서버에 로그인한다. 계정·세션키·로컬 데이터는 서버마다 따로다.
 //!
 //! ```text
-//! <앱 데이터>/config.toml                      mount_point, servers = [{id, url, name}]
+//! <앱 데이터>/config.toml                      mount_point, extra_players, servers = [{id, url, name}]
 //! <앱 데이터>/servers/<server_id>/index.sqlite  서버별 로컬 데이터 (paths::Paths)
 //! <앱 데이터>/servers/<server_id>/session       세션키 (키체인을 못 쓸 때만)
 //! ```
@@ -22,6 +22,9 @@ pub struct Config {
     pub mount_point: Option<PathBuf>,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
+    /// 기본 구동기([`crate::players::DEFAULT_PLAYERS`]) 외에 곡 전체를 받을 수 있는 프로그램 이름.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_players: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +38,15 @@ pub struct ServerEntry {
 }
 
 impl Config {
+    /// 곡 전체를 받을 수 있는 프로그램 이름 (기본 구동기 + `extra_players`).
+    pub fn players(&self) -> Vec<String> {
+        crate::players::DEFAULT_PLAYERS
+            .iter()
+            .map(|s| s.to_string())
+            .chain(self.extra_players.iter().cloned())
+            .collect()
+    }
+
     /// 서버를 추가한다. 같은 주소가 이미 있으면 오류.
     pub fn add(&mut self, url: &str, name: Option<&str>) -> Result<&ServerEntry> {
         let url = normalize_url(url)?;

@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
-use crate::fs::{Attr, DirEntry, Kind, ReadOnlyFs};
+use crate::fs::{Attr, Caller, DirEntry, Kind, ReadOnlyFs};
 use crate::tree::{Ino, ROOT};
 use crate::{Error, Result};
 
@@ -177,17 +177,18 @@ impl ReadOnlyFs for Drive {
         )
     }
 
-    fn read(&self, ino: Ino, offset: u64, size: u32) -> Result<Vec<u8>> {
+    fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>> {
         let (fs, _) = self
             .member(ino)
             .ok_or_else(|| Error::Other(format!("not a file: {ino}")))?;
-        fs.read(ino & INNER_MASK, offset, size)
+        fs.read(ino & INNER_MASK, offset, size, caller)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fs::Trusted;
 
     /// 루트 아래 `song/a.txt` 하나만 있는 서버.
     struct Fake(&'static str);
@@ -230,7 +231,7 @@ mod tests {
                 kind,
             }])
         }
-        fn read(&self, ino: Ino, offset: u64, size: u32) -> Result<Vec<u8>> {
+        fn read(&self, ino: Ino, offset: u64, size: u32, _: &dyn Caller) -> Result<Vec<u8>> {
             assert_eq!(ino, FILE);
             let data = self.0.as_bytes();
             let start = (offset as usize).min(data.len());
@@ -241,7 +242,7 @@ mod tests {
 
     fn read_all(fs: &dyn ReadOnlyFs, path: &str) -> String {
         let a = fs.resolve(path).expect(path);
-        String::from_utf8(fs.read(a.ino, 0, 1024).unwrap()).unwrap()
+        String::from_utf8(fs.read(a.ino, 0, 1024, &Trusted("test")).unwrap()).unwrap()
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Linux FUSE 백엔드 (macOS는 추후 검토). [`ebms_core::fs::ReadOnlyFs`]를 읽기 전용으로 마운트한다.
 //! 보통 서버별 최상위 폴더로 합친 [`ebms_core::drive::Drive`]를 마운트한다.
+//! 읽기를 요청한 프로세스를 `/proc`에서 확인해, 구동기만 곡 전체 다운로드(티켓 1개)를 일으킬 수 있게 한다.
 #![cfg(target_os = "linux")]
 
 use std::ffi::OsStr;
@@ -7,7 +8,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use ebms_core::fs::{Attr, Kind, ReadOnlyFs};
+use ebms_core::Error;
+use ebms_core::fs::{Attr, Caller, Kind, ReadOnlyFs};
 use fuser::{
     Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, INodeNo, IoctlFlags,
     LockOwner, MountOption, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
@@ -22,8 +24,50 @@ const TTL: Duration = Duration::from_secs(60);
 
 struct FuseFs {
     fs: Arc<dyn ReadOnlyFs>,
+    /// 곡 전체를 받을 수 있는 프로그램 이름 ([`ebms_core::players`])
+    players: Vec<String>,
     uid: u32,
     gid: u32,
+}
+
+/// FUSE 요청을 보낸 프로세스. 곡 다운로드가 필요할 때만 `/proc`을 읽는다.
+struct ProcCaller<'a> {
+    pid: u32,
+    players: &'a [String],
+}
+
+impl ProcCaller<'_> {
+    fn exe(&self) -> Option<String> {
+        std::fs::read_link(format!("/proc/{}/exe", self.pid))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
+    fn args(&self) -> Vec<String> {
+        std::fs::read(format!("/proc/{}/cmdline", self.pid))
+            .map(|raw| {
+                raw.split(|&b| b == 0)
+                    .filter(|a| !a.is_empty())
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl Caller for ProcCaller<'_> {
+    fn name(&self) -> String {
+        let comm = std::fs::read_to_string(format!("/proc/{}/comm", self.pid));
+        let comm = comm.as_deref().map(str::trim).unwrap_or("?");
+        // java처럼 실행 파일만으로는 알 수 없는 경우를 위해 명령줄도 남긴다.
+        let args = self.args().join(" ");
+        let args: String = args.chars().take(200).collect();
+        format!("{comm}[{}] {args}", self.pid)
+    }
+
+    fn is_player(&self) -> bool {
+        ebms_core::players::is_player(self.players, self.exe().as_deref(), &self.args())
+    }
 }
 
 impl FuseFs {
@@ -83,7 +127,7 @@ impl Filesystem for FuseFs {
 
     fn read(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         _fh: FileHandle,
         offset: u64,
@@ -92,8 +136,14 @@ impl Filesystem for FuseFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        match self.fs.read(ino.into(), offset, size) {
+        let caller = ProcCaller {
+            pid: req.pid(),
+            players: &self.players,
+        };
+        match self.fs.read(ino.into(), offset, size, &caller) {
             Ok(data) => reply.data(&data),
+            // 이미 로그를 남겼다. 다른 프로그램에는 권한 없음으로 보인다.
+            Err(Error::NotPlayer { .. }) => reply.error(Errno::EACCES),
             Err(e) => {
                 warn!(ino = u64::from(ino), %e, "read failed");
                 reply.error(Errno::EIO);
@@ -184,10 +234,12 @@ fn clear_stale(mountpoint: &Path) {
 }
 
 /// 백그라운드 스레드에서 마운트한다. 반환값을 drop하면 언마운트된다.
-/// 마운트 위치 폴더가 없으면 만든다.
+/// 마운트 위치 폴더가 없으면 만든다. `players`([`ebms_core::config::Config::players`])에
+/// 해당하는 프로세스만 받지 않은 플레이 파일을 읽어 곡 전체를 받을 수 있다.
 pub fn spawn_mount(
     fs: Arc<dyn ReadOnlyFs>,
     mountpoint: &Path,
+    players: Vec<String>,
 ) -> std::io::Result<BackgroundSession> {
     let mut config = Config::default();
     config.mount_options = vec![
@@ -204,5 +256,14 @@ pub fn spawn_mount(
     config.n_threads = Some(8);
     // SAFETY: getuid/getgid는 실패하지 않는다.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    fuser::spawn_mount(FuseFs { fs, uid, gid }, mountpoint, &config)
+    fuser::spawn_mount(
+        FuseFs {
+            fs,
+            players,
+            uid,
+            gid,
+        },
+        mountpoint,
+        &config,
+    )
 }
