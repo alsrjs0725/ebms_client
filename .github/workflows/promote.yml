@@ -1,0 +1,31 @@
+name: Promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 승격 대상
+        type: choice
+        options: [stage, release]
+        required: true
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: promote-${{ inputs.target }}   # 승인 게이트
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Fast-forward 승격
+        run: |
+          SRC=$([ "${{ inputs.target }}" = "stage" ] && echo develop || echo stage)
+          git push origin "origin/$SRC:refs/heads/${{ inputs.target }}"
