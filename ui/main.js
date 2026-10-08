@@ -1,4 +1,4 @@
-// 설정 창. 서버 목록·로그인·계정 정보·가상 드라이브 위치.
+// 설정 창. 서버 목록·로그인·계정 정보·캐시·가상 드라이브 위치.
 // 서버가 보낸 문자열은 모두 textContent로만 넣는다.
 "use strict";
 
@@ -118,6 +118,13 @@ function renderServer(s) {
     sync.textContent = `마지막 동기화: ${timeText(s.sync.last_ok_at)}`;
   }
 
+  const usage = li.querySelector(".usage");
+  const u = s.usage;
+  if (u) {
+    usage.textContent = `캐시 ${bytes(u.cache_bytes)} / ${bytes(u.cache_limit)} · 로컬 데이터 전체 ${bytes(u.total_bytes)}`;
+  }
+  usage.hidden = !u;
+
   const loginBtn = li.querySelector(".login");
   const logoutBtn = li.querySelector(".logout");
   const linkBtn = li.querySelector(".account-link");
@@ -155,10 +162,27 @@ function renderServer(s) {
       await refresh();
     }),
   );
+  const clearBtn = li.querySelector(".clear-cache");
+  clearBtn.disabled = !u || u.cache_bytes === 0;
+  confirmClick(clearBtn, "한 번 더 누르면 캐시 비우기", () =>
+    run(clearBtn, async () => {
+      const freed = await invoke("clear_cache", { id: s.id });
+      showMessage(`${s.name}: 캐시 ${bytes(freed)}를 비웠습니다.`, "info");
+      await refresh();
+    }),
+  );
   const removeBtn = li.querySelector(".remove");
-  confirmClick(removeBtn, "한 번 더 누르면 삭제", () =>
+  confirmClick(removeBtn, "한 번 더 누르면 삭제 (로컬 데이터는 남김)", () =>
     run(removeBtn, async () => {
-      await invoke("remove_server", { id: s.id });
+      await invoke("remove_server", { id: s.id, purge: false });
+      await refresh();
+    }),
+  );
+  const purgeBtn = li.querySelector(".remove-purge");
+  if (u) purgeBtn.textContent = `삭제 + 로컬 데이터 지우기 (${bytes(u.total_bytes)})`;
+  confirmClick(purgeBtn, "한 번 더 누르면 삭제하고 로컬 데이터도 지움", () =>
+    run(purgeBtn, async () => {
+      await invoke("remove_server", { id: s.id, purge: true });
       await refresh();
     }),
   );

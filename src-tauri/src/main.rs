@@ -69,6 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::list_servers,
             commands::add_server,
             commands::remove_server,
+            commands::clear_cache,
             commands::login,
             commands::logout,
             commands::open_account,

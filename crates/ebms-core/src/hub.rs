@@ -30,6 +30,17 @@ pub struct Server {
     sync_lock: tokio::sync::Mutex<()>,
 }
 
+/// 이 서버가 쓰는 로컬 저장 공간. 설정 창에 보여준다.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct LocalUsage {
+    /// 받은 에셋 캐시
+    pub cache_bytes: u64,
+    /// 캐시 한도
+    pub cache_limit: u64,
+    /// 캐시 + 인덱스 + 차트. 서버를 지울 때 함께 지울 수 있는 양
+    pub total_bytes: u64,
+}
+
 /// 마지막 동기화 결과. 설정 창에만 보여준다.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SyncStatus {
@@ -49,6 +60,25 @@ impl Server {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// 로컬 저장 공간. 폴더를 훑으므로 런타임 밖(`spawn_blocking`)에서 부른다.
+    pub fn usage(&self) -> Result<LocalUsage> {
+        let cache = self.client.fetcher.cache();
+        let cache_bytes = cache.total()?;
+        Ok(LocalUsage {
+            cache_bytes,
+            cache_limit: cache.limit(),
+            total_bytes: cache_bytes + self.client.paths.size_without_cache(),
+        })
+    }
+
+    /// 캐시를 비운다 ("항상 보관" 곡은 남김). 지운 바이트 수.
+    pub async fn clear_cache(&self) -> Result<u64> {
+        let cache = self.client.fetcher.cache().clone();
+        tokio::task::spawn_blocking(move || cache.clear())
+            .await
+            .map_err(|e| Error::Other(e.to_string()))?
     }
 
     /// 동기화하고 바뀐 게 있으면 가상 트리를 다시 만든다.
@@ -90,6 +120,7 @@ impl Hub {
     /// 키체인을 읽으므로 tokio 런타임 밖에서 부른다. `rt`는 다운로드를 돌릴 런타임.
     pub fn open(dir: AppDir, use_keyring: bool, rt: Handle) -> Result<Self> {
         let config = dir.load_config()?;
+        dir.purge_pending();
         let hub = Self {
             dir,
             use_keyring,
@@ -193,16 +224,23 @@ impl Hub {
         Ok(server)
     }
 
-    /// 로그아웃하고 목록에서 뺀다. 로컬 데이터는 남긴다.
-    pub async fn remove(&self, id: &str) -> Result<ServerEntry> {
-        let server = self.server(id)?;
+    /// 로그아웃하고 목록에서 뺀다. `purge`면 로컬 데이터(인덱스·차트·캐시)도 지운다.
+    /// 쓰는 중이라 다 못 지운 파일은 다음에 앱을 열 때 지운다.
+    pub async fn remove(&self, id: &str, purge: bool) -> Result<ServerEntry> {
+        let entry = self.server(id)?.entry.clone();
         self.logout(id).await?;
         self.update_config(|c| {
             c.remove(id);
         })?;
         self.drive.remove(id);
         self.lock().servers.remove(id);
-        Ok(server.entry.clone())
+        if purge {
+            let (dir, e) = (self.dir.clone(), entry.clone());
+            tokio::task::spawn_blocking(move || dir.purge_server_dir(&e))
+                .await
+                .map_err(|e| Error::Other(e.to_string()))??;
+        }
+        Ok(entry)
     }
 
     /// 브라우저 로그인. `open_browser`에 로그인 주소를 넘긴다. 받은 세션키는 저장하고 바로 쓴다.
@@ -273,6 +311,7 @@ fn open_server(
     rt: &Handle,
     entry: &ServerEntry,
 ) -> Result<Arc<Server>> {
+    dir.prepare_server_dir(entry)?;
     let mut opts = Options::new(&entry.url, dir.server_dir(entry));
     opts.session = SessionStore::new(&entry.url, &dir.server_dir(entry), use_keyring).load()?;
     let client = Client::open(&opts)?;

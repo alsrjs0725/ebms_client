@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use ebms_core::Error;
 use ebms_core::api::Me;
-use ebms_core::hub::{Server, SyncStatus};
+use ebms_core::hub::{LocalUsage, Server, SyncStatus};
 use serde::Serialize;
 use tauri::{AppHandle, State};
 
@@ -36,6 +36,8 @@ pub struct ServerView {
     /// 서버에 닿지 않는 등 계정 정보를 못 가져온 이유
     error: Option<String>,
     sync: SyncStatus,
+    /// 로컬 저장 공간. 못 읽으면 None
+    usage: Option<LocalUsage>,
 }
 
 async fn view(server: Arc<Server>) -> ServerView {
@@ -57,6 +59,17 @@ async fn view(server: Arc<Server>) -> ServerView {
     } else {
         "logged_in"
     };
+    let usage = {
+        let server = server.clone();
+        match tokio::task::spawn_blocking(move || server.usage()).await {
+            Ok(Ok(u)) => Some(u),
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "could not read local usage");
+                None
+            }
+            Err(_) => None,
+        }
+    };
     ServerView {
         id: server.entry.id.clone(),
         name: server.entry.name.clone(),
@@ -65,6 +78,7 @@ async fn view(server: Arc<Server>) -> ServerView {
         me,
         error,
         sync: server.sync_status(),
+        usage,
     }
 }
 
@@ -85,9 +99,16 @@ pub async fn add_server(
 }
 
 #[tauri::command]
-pub async fn remove_server(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.hub.remove(&id).await.map_err(err)?;
+pub async fn remove_server(state: State<'_, AppState>, id: String, purge: bool) -> CmdResult<()> {
+    state.hub.remove(&id, purge).await.map_err(err)?;
     Ok(())
+}
+
+/// 서버의 캐시를 비운다. 지운 바이트 수.
+#[tauri::command]
+pub async fn clear_cache(state: State<'_, AppState>, id: String) -> CmdResult<u64> {
+    let server = state.hub.server(&id).map_err(err)?;
+    server.clear_cache().await.map_err(err)
 }
 
 /// 브라우저로 로그인하고, 끝나면 바로 동기화를 시작한다.

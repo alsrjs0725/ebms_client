@@ -741,14 +741,41 @@ fn several_servers_show_as_top_level_folders() {
     let path = format!("Server A/{SONG}/banner.png");
     assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
 
+    // 캐시 사용량을 보여주고 비울 수 있다.
+    let usage = a.usage().unwrap();
+    assert!(usage.cache_bytes > 0);
+    assert_eq!(usage.cache_limit, 20 << 30);
+    assert!(
+        usage.total_bytes > usage.cache_bytes,
+        "index and charts count too"
+    );
+    let freed = rt.block_on(a.clear_cache()).unwrap();
+    assert_eq!(freed, usage.cache_bytes);
+    assert_eq!(a.usage().unwrap().cache_bytes, 0);
+    let cache_dir = hub.app_dir().server_dir(&a.entry).join("cache");
+    assert_eq!(std::fs::read_dir(&cache_dir).unwrap().count(), 0);
+
     // 삭제하면 로그아웃하고 드라이브에서 빠진다. 설정 파일에도 남지 않는다.
-    rt.block_on(hub.remove(&b.entry.id)).unwrap();
+    // 로컬 데이터도 지우기를 고르면 서버 폴더가 사라진다.
+    // (Windows는 열린 파일을 못 지우므로 서버 B를 놓아 준다.)
+    let b_entry = b.entry.clone();
+    drop(b);
+    let b_dir = hub.app_dir().server_dir(&b_entry);
+    assert!(b_dir.join("index.sqlite").exists());
+    rt.block_on(hub.remove(&b_entry.id, true)).unwrap();
+    assert!(!b_dir.exists());
     assert!(state_b.server().sessions.is_empty());
     assert!(drive.resolve("Server B").is_none());
     assert!(drive.resolve("Server A").is_some());
     let config = AppDir::new(dir.path()).load_config().unwrap();
     assert_eq!(config.servers.len(), 1);
     assert_eq!(config.servers[0].name, "Server A");
+
+    // 지우지 않으면 로컬 데이터는 남는다.
+    let a_dir = hub.app_dir().server_dir(&a.entry);
+    rt.block_on(hub.remove(&a.entry.id, false)).unwrap();
+    assert!(a_dir.join("index.sqlite").exists());
+    rt.block_on(hub.add(&url_a, Some("Server A"))).unwrap();
 
     // 다시 열면 남은 서버만
     drop(hub);

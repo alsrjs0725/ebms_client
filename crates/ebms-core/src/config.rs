@@ -6,6 +6,7 @@
 //! <앱 데이터>/config.toml                      mount_point, extra_players, servers = [{id, url, name}]
 //! <앱 데이터>/servers/<server_id>/index.sqlite  서버별 로컬 데이터 (paths::Paths)
 //! <앱 데이터>/servers/<server_id>/session       세션키 (키체인을 못 쓸 때만)
+//! <앱 데이터>/servers/<server_id>/.purge        지우다 실패한 폴더 표시 (다음에 다시 지운다)
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -14,6 +15,9 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
+
+/// 지우다 실패한 서버 폴더에 남기는 표시. 다음에 열 때 다시 지운다.
+const PURGE_MARK: &str = ".purge";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
@@ -174,6 +178,40 @@ impl AppDir {
         self.root.join("servers").join(&server.id)
     }
 
+    /// 서버의 로컬 데이터(인덱스·차트·캐시·세션 파일)를 지운다.
+    /// 다른 프로그램이 파일을 열고 있어 다 지우지 못하면 표시를 남기고 `false`를 돌려준다.
+    /// 남은 것은 [`Self::purge_pending`]이나 [`Self::prepare_server_dir`]가 다시 지운다.
+    pub fn purge_server_dir(&self, server: &ServerEntry) -> Result<bool> {
+        purge_dir(&self.server_dir(server))
+    }
+
+    /// 지우다 만 서버 폴더를 다시 지워 본다. 앱을 시작할 때 부른다.
+    pub fn purge_pending(&self) {
+        let Ok(entries) = std::fs::read_dir(self.root.join("servers")) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if dir.join(PURGE_MARK).exists()
+                && let Err(e) = purge_dir(&dir)
+            {
+                tracing::warn!(?dir, %e, "could not purge server data");
+            }
+        }
+    }
+
+    /// 서버를 열기 전에 부른다. 같은 id로 지우다 만 데이터가 있으면 먼저 지운다.
+    pub fn prepare_server_dir(&self, server: &ServerEntry) -> Result<()> {
+        let dir = self.server_dir(server);
+        if dir.join(PURGE_MARK).exists() && !purge_dir(&dir)? {
+            return Err(Error::Config(format!(
+                "local data of a removed server is still in use: {}. close programs using it and try again",
+                dir.display()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn load_config(&self) -> Result<Config> {
         match std::fs::read_to_string(self.config_path()) {
             Ok(text) => toml::from_str(&text)
@@ -190,6 +228,19 @@ impl AppDir {
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, self.config_path())?;
         Ok(())
+    }
+}
+
+/// 폴더를 지운다. 다 못 지우면 표시를 남기고 `false`.
+fn purge_dir(dir: &Path) -> Result<bool> {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => {
+            tracing::warn!(?dir, %e, "server data not fully removed, will retry later");
+            std::fs::write(dir.join(PURGE_MARK), b"")?;
+            Ok(false)
+        }
     }
 }
 
@@ -244,5 +295,32 @@ mod tests {
         c.add("http://127.0.0.1:8000", None).unwrap();
         app.save_config(&c).unwrap();
         assert_eq!(app.load_config().unwrap(), c);
+    }
+
+    #[test]
+    fn purge_server_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppDir::new(dir.path());
+        let mut c = Config::default();
+        let a = c.add("http://a.example", None).unwrap().clone();
+        let b = c.add("http://b.example", None).unwrap().clone();
+        for s in [&a, &b] {
+            std::fs::create_dir_all(app.server_dir(s).join("cache/1")).unwrap();
+            std::fs::write(app.server_dir(s).join("cache/1/x.ogg"), b"x").unwrap();
+        }
+        assert!(app.purge_server_dir(&a).unwrap());
+        assert!(!app.server_dir(&a).exists());
+        assert!(app.server_dir(&b).exists());
+        // 없는 폴더도 성공
+        assert!(app.purge_server_dir(&a).unwrap());
+
+        // 지우다 만 폴더는 다음에 지운다.
+        std::fs::write(app.server_dir(&b).join(PURGE_MARK), b"").unwrap();
+        app.prepare_server_dir(&b).unwrap();
+        assert!(!app.server_dir(&b).exists());
+        std::fs::create_dir_all(app.server_dir(&b)).unwrap();
+        std::fs::write(app.server_dir(&b).join(PURGE_MARK), b"").unwrap();
+        app.purge_pending();
+        assert!(!app.server_dir(&b).exists());
     }
 }
