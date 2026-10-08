@@ -215,10 +215,13 @@ mod tests {
         };
 
         #[cfg(windows)]
-        let _file_lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&_cached_file)?;
+        let _file_lock = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&_cached_file)?
+        };
 
         let start = std::time::Instant::now();
         // evict() with limit 0 should finish quickly without looping infinitely
