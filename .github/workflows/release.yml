@@ -1,0 +1,80 @@
+name: Release
+
+# main(release) 병합 시 정식 릴리스 v<버전>, stage 병합 시 사전 릴리스 `stage`를 갱신
+on:
+  push:
+    branches: [main, stage]
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+            exe: ""
+          - os: windows-latest
+            platform: windows-x64
+            exe: ".exe"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
+      - run: cargo test --workspace
+      - run: cargo build --release -p ebms-app --features tauri/custom-protocol
+      - run: cargo build --release -p ebms-cli
+      - name: 패키징
+        shell: bash
+        run: |
+          name="ebms-${{ matrix.platform }}"
+          mkdir -p "dist/$name"
+          cp "target/release/ebms-app${{ matrix.exe }}" "target/release/ebms${{ matrix.exe }}" README.md LICENSE "dist/$name/"
+          cd dist
+          if [ "$RUNNER_OS" = "Windows" ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ebms-${{ matrix.platform }}
+          path: dist/ebms-${{ matrix.platform }}.*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: GitHub Release 업로드
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml)
+          notes="커밋 ${GITHUB_SHA::7} (${GITHUB_REF_NAME}). Linux 실행에는 libwebkit2gtk-4.1, fuse3 패키지가 필요합니다."
+          if [ "$GITHUB_REF_NAME" = "main" ]; then
+            tag="v$version"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "::error::$tag 릴리스가 이미 있습니다. Cargo.toml의 workspace 버전을 올린 뒤 병합하세요."
+              exit 1
+            fi
+            gh release create "$tag" dist/* --target "$GITHUB_SHA" --title "EBMS $tag" --notes "$notes"
+          else
+            tag="stage"
+            gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+            gh release create "$tag" dist/* --target "$GITHUB_SHA" --prerelease \
+              --title "EBMS stage (v$version, ${GITHUB_SHA::7})" --notes "$notes"
+          fi
