@@ -191,23 +191,39 @@ mod tests {
         let cache = Cache::new(root.clone(), tmp, index.clone(), 0);
 
         // Put a file in the cache
-        cache.put(1, "test.txt", b"hello world")?;
+        let _cached_file = cache.put(1, "test.txt", b"hello world")?;
         assert_eq!(cache.total()?, 11);
 
-        // Make the song directory read-only so remove_file fails on Unix systems
+        // Make remove_file fail in an OS-appropriate way
+        #[cfg(unix)]
         let song_dir = root.join("1");
-        let mut permissions = std::fs::metadata(&song_dir)?.permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(&song_dir, permissions.clone())?;
+        #[cfg(unix)]
+        let _reset_perms = {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&song_dir)?.permissions();
+            permissions.set_mode(0o555);
+            std::fs::set_permissions(&song_dir, permissions)?;
+            struct Reset(PathBuf);
+            impl Drop for Reset {
+                fn drop(&mut self) {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+                }
+            }
+            Reset(song_dir)
+        };
+
+        #[cfg(windows)]
+        let _file_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&_cached_file)?;
 
         let start = std::time::Instant::now();
         // evict() with limit 0 should finish quickly without looping infinitely
         let freed = cache.evict()?;
         let elapsed = start.elapsed();
-
-        // Restore permissions so cleanup works
-        permissions.set_readonly(false);
-        let _ = std::fs::set_permissions(&song_dir, permissions);
 
         assert!(elapsed < std::time::Duration::from_secs(2));
         // Item should be removed from index even though file deletion failed
