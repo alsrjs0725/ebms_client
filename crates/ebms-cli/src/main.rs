@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use ebms_core::api::Api;
 use ebms_core::auth::LoginRequest;
 use ebms_core::config::{AppDir, Config, ServerEntry};
-use ebms_core::fs::{Kind, ReadOnlyFs};
+use ebms_core::fs::{Kind, ReadOnlyFs, Trusted};
 use ebms_core::session::SessionStore;
 use ebms_core::{Client, Error, Options};
 
@@ -210,7 +210,9 @@ fn main() -> anyhow::Result<()> {
             let mut out = std::io::stdout().lock();
             let mut offset = 0;
             while offset < attr.size {
-                let buf = fs.read(attr.ino, offset, 1 << 20).map_err(login_hint)?;
+                let buf = fs
+                    .read(attr.ino, offset, 1 << 20, &Trusted("ebms cat"))
+                    .map_err(login_hint)?;
                 if buf.is_empty() {
                     break;
                 }
@@ -395,7 +397,7 @@ fn mount(
     }
     // 서버에 연결되지 않아도 로컬 인덱스로 마운트한다.
     rt.block_on(hub.sync_all());
-    let _session = ebms_vfs_fuse::spawn_mount(drive, mountpoint)
+    let _session = ebms_vfs_fuse::spawn_mount(drive, mountpoint, hub.config().players())
         .with_context(|| format!("mount {}", mountpoint.display()))?;
     tracing::info!(mountpoint = %mountpoint.display(), "mounted");
 

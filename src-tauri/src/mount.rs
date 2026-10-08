@@ -28,9 +28,12 @@ struct Inner {
     error: Option<String>,
 }
 
-/// 설정에 없으면 `~/ebms`.
+/// 설정에 없으면 `$XDG_RUNTIME_DIR/ebms` (보통 `/run/user/<uid>/ebms`), 없으면 `~/ebms`.
+/// 홈 안에 두면 백업·인덱서처럼 홈 전체를 훑는 프로그램이 플레이 파일을 읽게 된다.
 fn default_point() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join("ebms"))
+    dirs::runtime_dir()
+        .or_else(dirs::home_dir)
+        .map(|d| d.join("ebms"))
 }
 
 impl Mount {
@@ -80,7 +83,7 @@ impl Mount {
             inner.error = Some("no home folder, choose a mount point".into());
             return;
         };
-        match ebms_vfs_fuse::spawn_mount(hub.drive(), &point) {
+        match ebms_vfs_fuse::spawn_mount(hub.drive(), &point, hub.config().players()) {
             Ok(session) => {
                 tracing::info!(mountpoint = %point.display(), "mounted");
                 inner.session = Some(session);

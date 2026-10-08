@@ -28,14 +28,15 @@ pub struct FileEntry {
     pub kind: FileKind,
 }
 
-/// 파일을 어느 다운로드 API로 받는지.
+/// 파일을 어느 다운로드 API로 받는지. 서버가 알려주지 않으면 티켓을 쓰지 않는 `Pre`로 본다
+/// (서버는 플레이 파일의 사전 다운로드를 거절하므로 잘못 골라도 티켓이 빠지지 않는다).
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum FileKind {
     /// 배너·스테이지파일·프리뷰 등. 사전 API로 그 파일만 받는다.
+    #[default]
     Pre,
     /// 키음·BGA 등. 플레이 API로 곡 zip 전체를 받는다(티켓 1개).
-    #[default]
     Play,
 }
 
