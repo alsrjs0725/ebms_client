@@ -61,6 +61,8 @@ enum Cmd {
     Cat { path: String },
     /// 상태 요약
     Status,
+    /// 받은 에셋 캐시를 비움 ("항상 보관" 곡은 남김)
+    ClearCache,
     /// 가상 드라이브로 마운트하고 주기적으로 동기화 (Ctrl-C로 종료).
     /// 서버마다 최상위 폴더 하나. --server를 주면 그 서버만
     #[cfg(target_os = "linux")]
@@ -83,8 +85,13 @@ enum ServerCmd {
     },
     /// 서버 목록과 로그인 상태
     List,
-    /// 서버 삭제 (로그아웃하고 목록에서 뺌. 로컬 데이터는 남김)
-    Remove { server: String },
+    /// 서버 삭제 (로그아웃하고 목록에서 뺌. 로컬 데이터는 --purge를 줄 때만 지움)
+    Remove {
+        server: String,
+        /// 로컬 데이터(인덱스·차트·캐시)도 지움
+        #[arg(long)]
+        purge: bool,
+    },
 }
 
 struct App {
@@ -108,6 +115,7 @@ impl App {
     }
 
     fn client(&self, server: &ServerEntry) -> anyhow::Result<Client> {
+        self.dir.prepare_server_dir(server)?;
         let mut opts = Options::new(&server.url, self.dir.server_dir(server));
         opts.session = self.session(server).load()?;
         Ok(Client::open(&opts)?)
@@ -231,6 +239,12 @@ fn main() -> anyhow::Result<()> {
             println!("nodes: {}", tree.node_count());
             println!("cache: {} bytes", client.fetcher.cache().total()?);
         }
+        Cmd::ClearCache => {
+            let server = app.server(sel)?;
+            let client = app.client(&server)?;
+            let freed = client.fetcher.cache().clear()?;
+            println!("{}: cleared {freed} bytes", server.name);
+        }
         #[cfg(target_os = "linux")]
         Cmd::Mount {
             mountpoint,
@@ -277,7 +291,7 @@ fn server_cmd(rt: &tokio::runtime::Runtime, app: &mut App, cmd: ServerCmd) -> an
                 println!("{}\t{}\t{}\t{login}", s.id, s.name, s.url);
             }
         }
-        ServerCmd::Remove { server } => {
+        ServerCmd::Remove { server, purge } => {
             let entry = app.server(Some(&server))?;
             let store = app.session(&entry);
             if let Some(key) = store.load()? {
@@ -290,11 +304,23 @@ fn server_cmd(rt: &tokio::runtime::Runtime, app: &mut App, cmd: ServerCmd) -> an
             store.clear()?;
             app.config.remove(&entry.id);
             app.dir.save_config(&app.config)?;
-            println!(
-                "removed {}. local data kept in {}",
-                entry.name,
-                app.dir.server_dir(&entry).display()
-            );
+            let data = app.dir.server_dir(&entry);
+            if !purge {
+                let size = ebms_core::paths::dir_size(&data);
+                println!(
+                    "removed {}. local data ({size} bytes) kept in {} (delete with --purge)",
+                    entry.name,
+                    data.display()
+                );
+            } else if app.dir.purge_server_dir(&entry)? {
+                println!("removed {} and its local data", entry.name);
+            } else {
+                println!(
+                    "removed {}. some local data is in use and will be deleted later: {}",
+                    entry.name,
+                    data.display()
+                );
+            }
         }
     }
     Ok(())

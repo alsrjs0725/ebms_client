@@ -84,15 +84,25 @@ impl Cache {
 
     /// 한도를 넘으면 오래된 항목부터 지운다.
     pub fn evict(&self) -> Result<u64> {
+        self.evict_to(self.limit)
+    }
+
+    /// "항상 보관"이 아닌 항목을 모두 지운다. 읽는 중이라 못 지운 파일은 남긴다.
+    pub fn clear(&self) -> Result<u64> {
+        let freed = self.evict_to(0)?;
+        self.remove_empty_dirs();
+        Ok(freed)
+    }
+
+    /// 오래된 항목부터 `limit` 이하가 될 때까지 지운다.
+    fn evict_to(&self, limit: u64) -> Result<u64> {
         let mut total = self.index.cache_total()?;
         let mut freed = 0;
-        while total > self.limit {
+        while total > limit {
             let batch = self.index.cache_eviction_candidates(256)?;
-            if batch.is_empty() {
-                break;
-            }
-            for row in batch {
-                if total <= self.limit {
+            let mut progressed = false;
+            for row in &batch {
+                if total <= limit {
                     break;
                 }
                 if let Ok(path) = self.path(row.song_id, &row.path)
@@ -105,9 +115,35 @@ impl Cache {
                 self.index.cache_remove(row.song_id, &row.path)?;
                 total = total.saturating_sub(row.size);
                 freed += row.size;
+                progressed = true;
+            }
+            // 지울 게 없거나 모두 실패하면 같은 후보만 다시 나오므로 멈춘다.
+            if !progressed {
+                break;
             }
         }
         Ok(freed)
+    }
+
+    /// 비워진 곡 폴더를 지운다. 파일이 남은 폴더는 그대로 둔다.
+    fn remove_empty_dirs(&self) {
+        fn walk(dir: &Path) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    walk(&path);
+                    let _ = std::fs::remove_dir(&path);
+                }
+            }
+        }
+        walk(&self.root);
+    }
+
+    pub fn limit(&self) -> u64 {
+        self.limit
     }
 
     pub fn total(&self) -> Result<u64> {
