@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Cursor, Read, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -52,10 +52,18 @@ struct Counters {
     manifest: AtomicUsize,
 }
 
+/// 켜 두면 사전 파일 응답을 `release`까지 붙잡는다. 멈춘 다운로드 흉내.
+#[derive(Default)]
+struct Gate {
+    hold_pre: AtomicBool,
+    release: tokio::sync::Notify,
+}
+
 #[derive(Clone)]
 struct AppState {
     server: Arc<Mutex<Server>>,
     counters: Arc<Counters>,
+    gate: Arc<Gate>,
 }
 
 impl AppState {
@@ -193,6 +201,9 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                  headers: HeaderMap| async move {
                     s.authorized(&headers)?;
                     s.counters.pre_file.fetch_add(1, Ordering::SeqCst);
+                    if s.gate.hold_pre.load(Ordering::SeqCst) {
+                        s.gate.release.notified().await;
+                    }
                     let path = &q["path"];
                     let server = s.server();
                     if !server.pre_paths.contains(path) {
@@ -359,6 +370,7 @@ fn server_state() -> (AppState, Fixture) {
     let state = AppState {
         server: Arc::new(Mutex::new(server)),
         counters: Arc::default(),
+        gate: Arc::default(),
     };
     (state, fixture)
 }
@@ -582,6 +594,53 @@ fn pre_files_alone_and_play_files_as_whole_song() {
     }
     assert_eq!(c.play.load(Ordering::SeqCst), 1);
     assert_eq!(c.pre_file.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn async_read_returns_before_download_finishes() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    env.state.gate.hold_pre.store(true, Ordering::SeqCst);
+
+    let read = |path: &str| {
+        let attr = fs.resolve(&format!("{SONG}/{path}")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        fs.read_async(
+            attr.ino,
+            0,
+            attr.size as u32,
+            Box::new(Trusted("test")),
+            Box::new(move |r| tx.send(r).unwrap()),
+        );
+        rx
+    };
+
+    // 사전 파일 응답이 멈춰 있어도 호출은 바로 돌아오고 결과는 아직 없다.
+    let preview = read("preview.ogg");
+    assert!(
+        preview.recv_timeout(Duration::from_millis(300)).is_err(),
+        "should still be downloading"
+    );
+    // 그 사이 같은 스레드에서 다른 읽기는 그대로 끝난다.
+    assert_eq!(
+        read("_7a.bme").recv().unwrap().unwrap(),
+        env.fixture.chart_a
+    );
+
+    env.state.gate.release.notify_one();
+    assert_eq!(
+        preview
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap(),
+        env.want("preview.ogg")
+    );
+    // 받은 뒤에는 캐시에서 바로 끝난다.
+    assert_eq!(
+        read("preview.ogg").try_recv().unwrap().unwrap(),
+        env.want("preview.ogg")
+    );
 }
 
 /// 백업·인덱서처럼 구동기가 아닌 프로그램.

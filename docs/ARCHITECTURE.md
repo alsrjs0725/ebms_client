@@ -83,8 +83,8 @@ E:\ (또는 ~/ebms 마운트 지점)
 ```
 
 원칙
-- 로직은 전부 `ebms-core`. FS 백엔드는 `ReadOnlyFs` trait(`lookup`, `getattr`, `readdir`, `open`, `read`) 하나만 구현한다.
-- FS 콜백 스레드는 절대 네트워크를 직접 기다리지 않는다. `fetcher`에 요청하고 완료 신호를 기다린다. 같은 파일 동시 요청은 한 번만 받는다.
+- 로직은 전부 `ebms-core`. FS 백엔드는 `ReadOnlyFs` trait(`lookup`, `getattr`, `readdir`, `open`, `read_async`) 하나만 쓴다.
+- FS 콜백 스레드는 절대 네트워크를 직접 기다리지 않는다. `read_async`로 `fetcher`에 맡기고 바로 돌아오며, 다운로드가 끝나면 완료 콜백이 응답한다. 같은 파일 동시 요청은 한 번만 받는다.
 
 ## 5. OS별 가상 FS 선택
 

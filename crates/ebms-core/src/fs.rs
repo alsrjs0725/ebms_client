@@ -1,7 +1,8 @@
 //! OS 가상 FS 백엔드(WinFsp, FUSE)가 호출하는 읽기 전용 파일시스템.
 //!
-//! 백엔드 스레드에서 동기적으로 호출한다. 다운로드가 필요한 읽기는 tokio 런타임에 맡기고 결과를 기다린다.
-//! 백엔드 스레드가 tokio 런타임 스레드여서는 안 된다.
+//! 백엔드 스레드에서 호출한다. 다운로드가 필요한 읽기는 [`ReadOnlyFs::read_async`]로 tokio 런타임에
+//! 맡기고 백엔드 스레드는 바로 돌아간다. 다운로드가 끝나면 런타임 쪽에서 완료 콜백을 부른다.
+//! 동기 [`ReadOnlyFs::read`]는 CLI·테스트용이며, 호출 스레드가 tokio 런타임 스레드여서는 안 된다.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, RwLock};
@@ -10,8 +11,9 @@ use tokio::runtime::Handle;
 
 use crate::fetch::Fetcher;
 use crate::index::Index;
+use crate::manifest::FileEntry;
 use crate::paths::Paths;
-use crate::tree::{Ino, ROOT, Source, Stat, Tree};
+use crate::tree::{Ino, ROOT, SongInfo, Source, Stat, Tree};
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,7 +37,7 @@ pub struct DirEntry {
 }
 
 /// 읽기를 요청한 프로그램. 곡 전체 다운로드(티켓 1개)가 필요할 때만 묻는다.
-pub trait Caller: Sync {
+pub trait Caller: Send + Sync {
     /// 로그에 남길 이름 (예: `java[1234]`)
     fn name(&self) -> String;
     /// BMS 구동기인지. 구동기만 곡 전체 다운로드를 일으킬 수 있다.
@@ -56,6 +58,9 @@ impl Caller for Trusted {
     }
 }
 
+/// [`ReadOnlyFs::read_async`]의 완료 콜백. 정확히 한 번 불린다.
+pub type ReadDone = Box<dyn FnOnce(Result<Vec<u8>>) + Send>;
+
 /// OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템. 서버 하나([`EbmsFs`])와
 /// 여러 서버를 합친 드라이브([`crate::drive::Drive`])가 구현한다.
 pub trait ReadOnlyFs: Send + Sync {
@@ -67,6 +72,20 @@ pub trait ReadOnlyFs: Send + Sync {
     /// `offset`부터 최대 `size` 바이트를 읽는다. 필요하면 다운로드를 기다린다.
     /// 곡 전체 다운로드는 `caller`가 구동기일 때만 한다.
     fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>>;
+
+    /// [`read`](Self::read)와 같지만 다운로드를 기다리지 않는다. 결과는 `done`으로 넘긴다.
+    /// 캐시에 있으면 호출 스레드에서 바로, 다운로드가 필요하면 끝난 뒤 런타임 스레드에서 `done`을 부른다.
+    /// FS 콜백 스레드가 네트워크를 기다려 드라이브 전체가 멈추지 않도록 백엔드는 이것을 쓴다.
+    fn read_async(
+        &self,
+        ino: Ino,
+        offset: u64,
+        size: u32,
+        caller: Box<dyn Caller>,
+        done: ReadDone,
+    ) {
+        done(self.read(ino, offset, size, &*caller));
+    }
 
     /// 폴더 항목 전체.
     fn readdir(&self, ino: Ino) -> Option<Vec<DirEntry>> {
@@ -149,24 +168,75 @@ impl ReadOnlyFs for EbmsFs {
     }
 
     fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>> {
+        match self.plan(ino, offset, size)? {
+            Plan::Done(data) => Ok(data),
+            Plan::Fetch { song, entry, len } => {
+                let fetcher = self.fetcher.clone();
+                let path = self
+                    .rt
+                    .block_on(async move { fetcher.ensure(&song, &entry, caller).await })?;
+                read_at(&path, offset, len)
+            }
+        }
+    }
+
+    fn read_async(
+        &self,
+        ino: Ino,
+        offset: u64,
+        size: u32,
+        caller: Box<dyn Caller>,
+        done: ReadDone,
+    ) {
+        let (song, entry, len) = match self.plan(ino, offset, size) {
+            Ok(Plan::Fetch { song, entry, len }) => (song, entry, len),
+            Ok(Plan::Done(data)) => return done(Ok(data)),
+            Err(e) => return done(Err(e)),
+        };
+        let fetcher = self.fetcher.clone();
+        self.rt.spawn(async move {
+            let result = match fetcher.ensure(&song, &entry, &*caller).await {
+                Ok(path) => tokio::task::spawn_blocking(move || read_at(&path, offset, len))
+                    .await
+                    .unwrap_or_else(|e| Err(Error::Other(e.to_string()))),
+                Err(e) => Err(e),
+            };
+            done(result);
+        });
+    }
+}
+
+/// 읽기를 바로 끝낼 수 있는지, 다운로드가 필요한지.
+enum Plan {
+    Done(Vec<u8>),
+    Fetch {
+        song: Arc<SongInfo>,
+        entry: Arc<FileEntry>,
+        len: u64,
+    },
+}
+
+impl EbmsFs {
+    /// 차트와 캐시에 있는 에셋은 바로 읽는다. 받아야 하면 [`Plan::Fetch`].
+    fn plan(&self, ino: Ino, offset: u64, size: u32) -> Result<Plan> {
         let Some((song, file_size, source)) = self.tree().file(ino) else {
             return Err(Error::Other(format!("not a file: {ino}")));
         };
         if offset >= file_size {
-            return Ok(Vec::new());
+            return Ok(Plan::Done(Vec::new()));
         }
         let len = (size as u64).min(file_size - offset);
         match source {
             Source::Chart {
                 chunk_id,
                 data_offset,
-            } => read_at(&self.paths.chart_chunk(chunk_id), data_offset + offset, len),
+            } => read_at(&self.paths.chart_chunk(chunk_id), data_offset + offset, len)
+                .map(Plan::Done),
             Source::Asset { entry, .. } => {
-                let fetcher = self.fetcher.clone();
-                let path = self
-                    .rt
-                    .block_on(async move { fetcher.ensure(&song, &entry, caller).await })?;
-                read_at(&path, offset, len)
+                match self.fetcher.cache().get(song.song_id, &entry.path)? {
+                    Some(path) => read_at(&path, offset, len).map(Plan::Done),
+                    None => Ok(Plan::Fetch { song, entry, len }),
+                }
             }
         }
     }
