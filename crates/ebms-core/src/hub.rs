@@ -85,19 +85,26 @@ impl Server {
     pub async fn sync(&self) -> Result<SyncReport> {
         let _guard = self.sync_lock.lock().await;
         let result = self.client.sync().await;
+        // 인덱스를 읽으므로 런타임 밖에서, 설정 창이 기다리지 않게 상태 잠금 밖에서.
+        if matches!(&result, Ok(report) if report.changed()) {
+            let fs = self.fs.clone();
+            let reloaded = tokio::task::spawn_blocking(move || fs.reload())
+                .await
+                .map_err(|e| Error::Other(e.to_string()))
+                .and_then(|r| r);
+            if let Err(e) = reloaded {
+                warn!(server = %self.entry.name, %e, "reload failed");
+            }
+        }
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         match &result {
-            Ok(report) => {
+            Ok(_) => {
                 status.last_ok_at = Some(unix_now());
                 status.last_error = None;
-                if report.changed()
-                    && let Err(e) = self.fs.reload()
-                {
-                    warn!(server = %self.entry.name, %e, "reload failed");
-                }
             }
             Err(e) => status.last_error = Some(e.to_string()),
         }
+        drop(status);
         result
     }
 }

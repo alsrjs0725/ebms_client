@@ -185,35 +185,54 @@ impl Index {
         Ok(())
     }
 
-    pub fn songs(&self) -> Result<Vec<SongManifest>> {
+    /// 곡 폴더 목록 `(song_id, folder)`. 파일 목록은 읽지 않는다.
+    pub fn song_folders(&self) -> Result<Vec<(u32, String)>> {
         let con = self.con();
-        let mut stmt = con.prepare("SELECT manifest FROM song ORDER BY id")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        let mut out = Vec::new();
-        for json in rows {
-            out.push(serde_json::from_str(&json?)?);
-        }
-        Ok(out)
+        let mut stmt =
+            con.prepare("SELECT id, json_extract(manifest, '$.folder') FROM song ORDER BY id")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get::<_, Option<String>>(1)?.unwrap_or_default(),
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn song(&self, song_id: u32) -> Result<Option<SongManifest>> {
+        let json: Option<String> = self
+            .con()
+            .query_row("SELECT manifest FROM song WHERE id = ?1", [song_id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
     pub fn charts(&self) -> Result<HashMap<String, ChartRow>> {
         let con = self.con();
         let mut stmt =
             con.prepare("SELECT sha256, ext, size, crc32, chunk_id, data_offset FROM chart")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(ChartRow {
-                sha256: r.get(0)?,
-                ext: r.get(1)?,
-                size: r.get::<_, i64>(2)? as u64,
-                crc32: r.get(3)?,
-                chunk_id: r.get(4)?,
-                data_offset: r.get::<_, i64>(5)? as u64,
-            })
-        })?;
+        let rows = stmt.query_map([], chart_row)?;
         let mut out = HashMap::new();
         for row in rows {
             let row = row?;
             out.insert(row.sha256.clone(), row);
+        }
+        Ok(out)
+    }
+
+    /// sha256으로 차트를 찾는다. 없는 것은 빠진다.
+    pub fn charts_by_sha(&self, sha256: &[String]) -> Result<Vec<ChartRow>> {
+        let con = self.con();
+        let mut stmt = con.prepare_cached(
+            "SELECT sha256, ext, size, crc32, chunk_id, data_offset FROM chart WHERE sha256 = ?1",
+        )?;
+        let mut out = Vec::new();
+        for sha in sha256 {
+            if let Some(row) = stmt.query_row([sha], chart_row).optional()? {
+                out.push(row);
+            }
         }
         Ok(out)
     }
@@ -296,4 +315,15 @@ impl Index {
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+}
+
+fn chart_row(r: &rusqlite::Row) -> rusqlite::Result<ChartRow> {
+    Ok(ChartRow {
+        sha256: r.get(0)?,
+        ext: r.get(1)?,
+        size: r.get::<_, i64>(2)? as u64,
+        crc32: r.get(3)?,
+        chunk_id: r.get(4)?,
+        data_offset: r.get::<_, i64>(5)? as u64,
+    })
 }

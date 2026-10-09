@@ -236,7 +236,7 @@ fn main() -> anyhow::Result<()> {
             println!("server: {} ({})", server.name, server.url);
             println!("data: {}", client.paths.root().display());
             println!("songs: {}", tree.song_count());
-            println!("nodes: {}", tree.node_count());
+            println!("loaded songs: {}", tree.loaded_songs());
             println!("cache: {} bytes", client.fetcher.cache().total()?);
         }
         Cmd::ClearCache => {
