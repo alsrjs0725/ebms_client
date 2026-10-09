@@ -186,27 +186,33 @@ impl Filesystem for FuseFs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        let Some(children) = self.fs.readdir(ino.into()) else {
-            return reply.error(Errno::ENOTDIR);
-        };
-        let parent = self.fs.parent(ino.into()).unwrap_or(ino.into());
-        let entries = [
-            (u64::from(ino), FileType::Directory, ".".to_string()),
-            (parent, FileType::Directory, "..".to_string()),
-        ]
-        .into_iter()
-        .chain(children.into_iter().map(|e| {
+        let ino = u64::from(ino);
+        let mut next = offset;
+        // `.`과 `..`이 0, 1번. 항목의 offset은 다음 항목 번호.
+        if next == 0 {
+            next = 1;
+            if reply.add(INodeNo(ino), next, FileType::Directory, ".") {
+                return reply.ok();
+            }
+        }
+        if next == 1 {
+            next = 2;
+            let parent = self.fs.parent(ino).unwrap_or(ino);
+            if reply.add(INodeNo(parent), next, FileType::Directory, "..") {
+                return reply.ok();
+            }
+        }
+        let is_dir = self.fs.readdir_from(ino, (next - 2) as usize, &mut |e| {
             let kind = if e.kind == Kind::Dir {
                 FileType::Directory
             } else {
                 FileType::RegularFile
             };
-            (e.ino, kind, e.name)
-        }));
-        for (i, (child, kind, name)) in entries.enumerate().skip(offset as usize) {
-            if reply.add(INodeNo(child), (i + 1) as u64, kind, name) {
-                break;
-            }
+            next += 1;
+            reply.add(INodeNo(e.ino), next, kind, e.name)
+        });
+        if !is_dir {
+            return reply.error(Errno::ENOTDIR);
         }
         reply.ok();
     }

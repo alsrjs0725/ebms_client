@@ -149,32 +149,34 @@ impl ReadOnlyFs for Drive {
         fs.parent(inner).map(|p| outer(slot, p))
     }
 
-    fn readdir(&self, ino: Ino) -> Option<Vec<DirEntry>> {
+    fn readdir_from(&self, ino: Ino, offset: usize, add: &mut dyn FnMut(DirEntry) -> bool) -> bool {
         if ino == ROOT {
-            let m = self.members.read().unwrap_or_else(|e| e.into_inner());
-            let mut entries: Vec<DirEntry> = m
-                .by_id
-                .values()
-                .map(|member| DirEntry {
-                    ino: outer(member.slot, ROOT),
-                    name: member.dir.clone(),
-                    kind: Kind::Dir,
-                })
-                .collect();
+            let mut entries: Vec<DirEntry> = {
+                let m = self.members.read().unwrap_or_else(|e| e.into_inner());
+                m.by_id
+                    .values()
+                    .map(|member| DirEntry {
+                        ino: outer(member.slot, ROOT),
+                        name: member.dir.clone(),
+                        kind: Kind::Dir,
+                    })
+                    .collect()
+            };
             entries.sort_by(|a, b| a.name.cmp(&b.name));
-            return Some(entries);
+            for e in entries.into_iter().skip(offset) {
+                if add(e) {
+                    break;
+                }
+            }
+            return true;
         }
-        let (fs, slot) = self.member(ino)?;
-        let entries = fs.readdir(ino & INNER_MASK)?;
-        Some(
-            entries
-                .into_iter()
-                .map(|mut e| {
-                    e.ino = outer(slot, e.ino);
-                    e
-                })
-                .collect(),
-        )
+        let Some((fs, slot)) = self.member(ino) else {
+            return false;
+        };
+        fs.readdir_from(ino & INNER_MASK, offset, &mut |mut e| {
+            e.ino = outer(slot, e.ino);
+            add(e)
+        })
     }
 
     fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>> {
@@ -219,17 +221,25 @@ mod tests {
                 _ => None,
             }
         }
-        fn readdir(&self, ino: Ino) -> Option<Vec<DirEntry>> {
+        fn readdir_from(
+            &self,
+            ino: Ino,
+            offset: usize,
+            add: &mut dyn FnMut(DirEntry) -> bool,
+        ) -> bool {
             let (ino, name, kind) = match ino {
                 ROOT => (SONG, "song", Kind::Dir),
                 SONG => (FILE, "a.txt", Kind::File),
-                _ => return None,
+                _ => return false,
             };
-            Some(vec![DirEntry {
-                ino,
-                name: name.into(),
-                kind,
-            }])
+            if offset == 0 {
+                add(DirEntry {
+                    ino,
+                    name: name.into(),
+                    kind,
+                });
+            }
+            true
         }
         fn read(&self, ino: Ino, offset: u64, size: u32, _: &dyn Caller) -> Result<Vec<u8>> {
             assert_eq!(ino, FILE);
