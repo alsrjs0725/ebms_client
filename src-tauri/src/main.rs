@@ -1,12 +1,14 @@
 //! 상주 앱과 설정 창.
 //!
-//! 등록된 서버를 모두 동기화하고 가상 드라이브를 띄운 채 상주한다. 알림·팝업·트레이 아이콘은 없다.
+//! 등록된 서버를 모두 동기화하고 가상 드라이브를 띄운 채 상주한다. 알림·트레이 아이콘은 없다.
+//! 켜질 때 서버 공지 중 확인하지 않은 것이 있으면 공지 창을 띄운다([`notices`]).
 //! 설정 창은 앱을 실행할 때 열리고, 닫으면 웹뷰를 해제한다. 이미 떠 있을 때 다시 실행해도 열린다.
 //! 자동 시작은 `--background`로 실행해 창 없이 뜬다(서버가 하나도 없으면 그래도 연다).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
 mod mount;
+mod notices;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,6 +24,7 @@ const SETTINGS: &str = "settings";
 pub struct AppState {
     pub hub: Arc<Hub>,
     pub mount: mount::Mount,
+    pub notices: notices::Notices,
 }
 
 fn main() {
@@ -63,6 +66,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }))
         .manage(AppState {
             mount: mount::Mount::default(),
+            notices: notices::Notices::new(&hub),
             hub: hub.clone(),
         })
         .invoke_handler(tauri::generate_handler![
@@ -77,6 +81,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::drive_info,
             commands::set_mount_point,
             commands::quit,
+            notices::pending_notices,
+            notices::ack_notices,
         ])
         .setup(move |app| {
             let state = app.state::<AppState>();
@@ -92,6 +98,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if show_settings {
                 open_settings(app.handle());
             }
+            notices::check_on_start(app.handle(), state.hub.clone());
             Ok(())
         })
         .build(tauri::generate_context!())?;

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "설정 창",
-  "windows": ["settings"],
+  "description": "설정 창, 공지 창",
+  "windows": ["settings", "notices"],
   "permissions": ["core:default"]
 }

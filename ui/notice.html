@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EBMS 공지</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="notice.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>공지</h1>
+    <p id="message" class="message" hidden></p>
+    <ul id="notices" class="servers"></ul>
+    <footer>
+      <button id="ack">확인</button>
+    </footer>
+  </main>
+
+  <template id="notice-template">
+    <li class="server notice">
+      <div class="head">
+        <div>
+          <strong class="title"></strong>
+          <span class="badge"></span>
+        </div>
+        <span class="url muted"></span>
+      </div>
+      <p class="body"></p>
+    </li>
+  </template>
+</body>
+</html>
