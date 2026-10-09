@@ -32,7 +32,10 @@ fn sha(data: &[u8]) -> String {
 
 #[derive(Default)]
 struct Server {
+    /// `/api/version`의 api. 3부터 사전 청크가 있다.
+    api: u32,
     chart_chunks: HashMap<u32, Vec<u8>>,
+    pre_chunks: HashMap<u32, Vec<u8>>,
     manifests: HashMap<u32, Vec<u8>>,
     songs: HashMap<u32, Vec<u8>>,
     /// 사전 파일 경로
@@ -53,6 +56,8 @@ struct Counters {
     play: AtomicUsize,
     pre_file: AtomicUsize,
     chart_chunk: AtomicUsize,
+    pre_chunk: AtomicUsize,
+    pre_hash: AtomicUsize,
     manifest: AtomicUsize,
 }
 
@@ -110,7 +115,10 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
     let app = Router::new()
         .route(
             "/api/version",
-            get(|| async { axum::Json(json!({"api": 1, "server": "test", "auth": ["google", "discord"]})) }),
+            get(|State(s): State<AppState>| async move {
+                let api = s.server().api;
+                axum::Json(json!({"api": api, "server": "test", "auth": ["google", "discord"]}))
+            }),
         )
         // ---- 로그인 (웹에는 이미 로그인돼 있다고 가정) ----
         .route(
@@ -171,6 +179,22 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             get(|State(s): State<AppState>, headers: HeaderMap| async move {
                 s.authorized(&headers)?;
                 Ok::<_, StatusCode>(axum::Json(hashes(&s.server().chart_chunks)))
+            }),
+        )
+        .route(
+            "/api/pre/assethash",
+            get(|State(s): State<AppState>, headers: HeaderMap| async move {
+                s.authorized(&headers)?;
+                s.counters.pre_hash.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, StatusCode>(axum::Json(hashes(&s.server().pre_chunks)))
+            }),
+        )
+        .route(
+            "/api/pre/asset/{id}",
+            get(|State(s): State<AppState>, Path(id): Path<u32>, headers: HeaderMap| async move {
+                s.authorized(&headers)?;
+                s.counters.pre_chunk.fetch_add(1, Ordering::SeqCst);
+                s.server().pre_chunks.get(&id).cloned().ok_or(StatusCode::NOT_FOUND)
             }),
         )
         .route(
@@ -380,6 +404,7 @@ fn server_state() -> (AppState, Fixture) {
     }];
 
     let mut server = Server {
+        api: 1,
         tickets: 5,
         pre_paths: PRE_FILES.iter().map(|s| s.to_string()).collect(),
         ..Default::default()
@@ -907,4 +932,95 @@ fn several_servers_show_as_top_level_folders() {
     let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
     assert_eq!(hub.servers().len(), 1);
     assert!(hub.drive().resolve(&format!("Server A/{SONG}")).is_some());
+}
+
+/// 서버처럼 `{song_id}/{경로}` 이름으로 사전 파일을 무압축으로 묶는다.
+fn pre_chunk(song_id: u32, files: &[(&str, &[u8])]) -> Vec<u8> {
+    let named: Vec<(String, &[u8])> = files
+        .iter()
+        .map(|(n, d)| (format!("{song_id}/{n}"), *d))
+        .collect();
+    let refs: Vec<(&str, &[u8])> = named.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+    make_zip(&refs, zip::CompressionMethod::Stored)
+}
+
+/// 사전 청크가 있는 서버(API 3).
+fn setup_with_pre_chunk() -> Env {
+    let env = setup(true);
+    let chunk = pre_chunk(
+        1,
+        &[
+            ("banner.png", &env.want("banner.png")),
+            ("preview.ogg", &env.want("preview.ogg")),
+        ],
+    );
+    let mut server = env.state.server();
+    server.api = 3;
+    server.pre_chunks.insert(0, chunk);
+    drop(server);
+    env
+}
+
+#[test]
+fn sync_downloads_pre_chunk_so_pre_files_need_no_download() {
+    let env = setup_with_pre_chunk();
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.pre_chunks_updated, vec![0]);
+    let c = &env.state.counters;
+    assert_eq!(c.pre_chunk.load(Ordering::SeqCst), 1);
+
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    for name in ["banner.png", "preview.ogg"] {
+        assert_eq!(
+            read_all_as(&fs, &format!("{SONG}/{name}"), &Indexer).unwrap(),
+            env.want(name)
+        );
+    }
+    assert_eq!(c.pre_file.load(Ordering::SeqCst), 0);
+    assert_eq!(c.play.load(Ordering::SeqCst), 0);
+    assert_eq!(env.client.fetcher.cache().total().unwrap(), 0);
+
+    // 바뀌지 않으면 다시 받지 않는다
+    assert!(!env.rt.block_on(env.client.sync()).unwrap().changed());
+    assert_eq!(c.pre_chunk.load(Ordering::SeqCst), 1);
+
+    // 서버에서 없어진 청크는 지운다
+    env.state.server().pre_chunks.clear();
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.pre_chunks_removed, vec![0]);
+    assert!(env.client.index.pre_files(1).unwrap().is_empty());
+}
+
+#[test]
+fn pre_file_missing_from_chunk_falls_back_to_pre_api() {
+    let env = setup_with_pre_chunk();
+    // 청크의 배너가 매니페스트와 다르면(서버가 다시 만드는 중 등) 청크를 믿지 않는다.
+    let chunk = pre_chunk(
+        1,
+        &[
+            ("banner.png", b"stale"),
+            ("preview.ogg", &env.want("preview.ogg")),
+        ],
+    );
+    env.state.server().pre_chunks.insert(0, chunk);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+
+    assert_eq!(
+        read_all(&fs, &format!("{SONG}/banner.png")).unwrap(),
+        env.want("banner.png")
+    );
+    assert_eq!(
+        read_all(&fs, &format!("{SONG}/preview.ogg")).unwrap(),
+        env.want("preview.ogg")
+    );
+    assert_eq!(env.state.counters.pre_file.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn old_server_has_no_pre_chunks() {
+    let env = setup(true);
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert!(report.pre_chunks_updated.is_empty());
+    assert_eq!(env.state.counters.pre_hash.load(Ordering::SeqCst), 0);
 }

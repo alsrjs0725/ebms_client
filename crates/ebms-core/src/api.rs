@@ -253,6 +253,10 @@ impl Api {
         self.hash_map("/api/pre/charthash").await
     }
 
+    pub async fn pre_hash(&self) -> Result<BTreeMap<u32, String>> {
+        self.hash_map("/api/pre/assethash").await
+    }
+
     pub async fn manifest_hash(&self) -> Result<BTreeMap<u32, String>> {
         self.hash_map("/api/pre/manifest/hash").await
     }
@@ -285,7 +289,13 @@ impl Api {
         save(resp, dest).await
     }
 
-    /// 곡의 사전 파일(배너·프리뷰 등) 하나를 압축 푼 내용으로 받는다.
+    /// 사전 청크 zip을 `dest`에 저장하고 sha256을 돌려준다.
+    pub async fn download_pre_chunk(&self, chunk_id: u32, dest: &Path) -> Result<String> {
+        let resp = self.get(&format!("/api/pre/asset/{chunk_id}")).await?;
+        save(resp, dest).await
+    }
+
+    /// 사전 청크에 아직 없는 곡의 사전 파일(배너·프리뷰 등) 하나를 압축 푼 내용으로 받는다.
     pub async fn pre_file(&self, song_id: u32, path: &str) -> Result<Bytes> {
         let mut url = Url::parse(&self.url(&format!("/api/pre/song/{song_id}/file")))
             .map_err(|e| Error::Config(format!("bad server url {}: {e}", self.base)))?;

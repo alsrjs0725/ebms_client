@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use tracing::warn;
 
 use crate::Result;
-use crate::index::{ChartRow, Index};
+use crate::index::{ChartRow, Index, PreRow};
 use crate::manifest::{FileEntry, SongManifest};
 
 pub type Ino = u64;
@@ -31,6 +31,8 @@ pub const SONG_CACHE: usize = 256;
 pub enum Source {
     /// 로컬 차트 청크(무압축) 안의 바이트.
     Chart { chunk_id: u32, data_offset: u64 },
+    /// 로컬 사전 청크(무압축) 안의 바이트. 동기화 때 받아 둔 배너·프리뷰 등.
+    Pre { chunk_id: u32, data_offset: u64 },
     /// 곡 zip 안의 파일. 처음 읽을 때 받는다.
     Asset { song_id: u32, entry: Arc<FileEntry> },
 }
@@ -57,6 +59,10 @@ pub trait SongSource: Send + Sync {
     fn song(&self, song_id: u32) -> Result<Option<SongManifest>>;
     /// sha256으로 로컬 차트를 찾는다. 없는 것은 빠진다.
     fn charts(&self, sha256: &[String]) -> Result<Vec<ChartRow>>;
+    /// 곡의 로컬 사전 파일. 사전 청크를 아직 받지 않았으면 비어 있다.
+    fn pre_files(&self, _song_id: u32) -> Result<Vec<PreRow>> {
+        Ok(Vec::new())
+    }
 }
 
 impl SongSource for Index {
@@ -66,6 +72,10 @@ impl SongSource for Index {
 
     fn charts(&self, sha256: &[String]) -> Result<Vec<ChartRow>> {
         self.charts_by_sha(sha256)
+    }
+
+    fn pre_files(&self, song_id: u32) -> Result<Vec<PreRow>> {
+        Index::pre_files(self, song_id)
     }
 }
 
@@ -181,7 +191,13 @@ impl Tree {
                 return Ok(None);
             };
             let charts = self.source.charts(&song.charts)?;
-            Ok::<_, crate::Error>(Some(SongTree::build(&song, &self.root[pos].name, charts)))
+            let pre = self.source.pre_files(song_id)?;
+            Ok::<_, crate::Error>(Some(SongTree::build(
+                &song,
+                &self.root[pos].name,
+                charts,
+                pre,
+            )))
         })();
         match loaded {
             Ok(Some(t)) => {
@@ -387,7 +403,7 @@ struct SongTree {
 }
 
 impl SongTree {
-    fn build(song: &SongManifest, dir_name: &str, charts: Vec<ChartRow>) -> Self {
+    fn build(song: &SongManifest, dir_name: &str, charts: Vec<ChartRow>, pre: Vec<PreRow>) -> Self {
         let files: Vec<Arc<FileEntry>> = song.files.iter().cloned().map(Arc::new).collect();
         let mut b = Builder {
             nodes: vec![SongNode {
@@ -402,6 +418,7 @@ impl SongTree {
 
         // 이 곡의 로컬 차트를 (size, crc32)로 찾는다. 서버 #10 반영 전 임시 매핑.
         let mut unmatched = charts;
+        let pre: HashMap<String, PreRow> = pre.into_iter().map(|p| (p.path.clone(), p)).collect();
 
         for entry in &files {
             let parts: Vec<&str> = entry.path.split('/').filter(|p| !p.is_empty()).collect();
@@ -421,7 +438,15 @@ impl SongTree {
                 song_id: song.song_id,
                 entry: entry.clone(),
             };
-            if crate::is_chart_path(&entry.path) {
+            if let Some(p) = pre.get(&entry.path)
+                && p.size == entry.size
+                && Some(p.crc32) == entry.crc32_value()
+            {
+                source = Source::Pre {
+                    chunk_id: p.chunk_id,
+                    data_offset: p.data_offset,
+                };
+            } else if crate::is_chart_path(&entry.path) {
                 let crc = entry.crc32_value();
                 if let Some(pos) = unmatched
                     .iter()

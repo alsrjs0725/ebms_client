@@ -39,7 +39,9 @@ pub use error::{Error, Result};
 pub const CHART_EXTS: &[&str] = &["bms", "bme", "bml", "pms"];
 
 /// 지원하는 서버 API 버전. 1은 로그인이 들어가고 기존 다운로드 API가 아직 남아 있는 서버.
-pub const API_VERSIONS: std::ops::RangeInclusive<u32> = 1..=2;
+pub const API_VERSIONS: std::ops::RangeInclusive<u32> = 1..=3;
+/// 사전 청크(`/api/pre/asset*`)가 생긴 API 버전. 이전 서버는 사전 파일을 요청 시 하나씩 받는다.
+pub const PRE_CHUNK_API: u32 = 3;
 
 pub(crate) fn is_chart_path(path: &str) -> bool {
     extension(path).is_some_and(|e| CHART_EXTS.contains(&e.as_str()))
