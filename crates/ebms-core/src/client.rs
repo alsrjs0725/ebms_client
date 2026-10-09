@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::Result;
 use crate::api::Api;
 use crate::cache::Cache;
 use crate::fetch::Fetcher;
@@ -9,6 +8,7 @@ use crate::fs::EbmsFs;
 use crate::index::Index;
 use crate::paths::Paths;
 use crate::sync::{SyncReport, sync_all};
+use crate::{Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -61,8 +61,14 @@ impl Client {
         })
     }
 
+    /// 동기화한 뒤 서버에서 바뀌거나 사라진 곡의 캐시를 지운다.
     pub async fn sync(&self) -> Result<SyncReport> {
-        sync_all(&self.api, &self.paths, &self.index).await
+        let report = sync_all(&self.api, &self.paths, &self.index).await?;
+        let cache = self.fetcher.cache().clone();
+        tokio::task::spawn_blocking(move || cache.drop_stale_songs())
+            .await
+            .map_err(|e| Error::Other(e.to_string()))??;
+        Ok(report)
     }
 
     /// 가상 FS. `rt`는 다운로드를 돌릴 tokio 런타임.

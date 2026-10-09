@@ -61,7 +61,7 @@ impl Fetcher {
         entry: &FileEntry,
         caller: &dyn Caller,
     ) -> Result<PathBuf> {
-        if let Some(p) = self.cache.get(song.song_id, &entry.path)? {
+        if let Some(p) = self.cache.get(song.song_id, &entry.path, entry.size)? {
             return Ok(p);
         }
 
@@ -77,22 +77,27 @@ impl Fetcher {
                 return Err(Error::NotPlayer { program });
             }
             self.ensure_song(song, &caller.name()).await?;
-            return self.cache.get(song.song_id, &entry.path)?.ok_or_else(|| {
-                Error::Integrity(format!(
-                    "song {}: {} not in song zip",
-                    song.song_id, entry.path
-                ))
-            });
+            return self
+                .cache
+                .get(song.song_id, &entry.path, entry.size)?
+                .ok_or_else(|| {
+                    Error::Integrity(format!(
+                        "song {}: {} not in song zip",
+                        song.song_id, entry.path
+                    ))
+                });
         }
 
         let lock = self.lock(Key::File(song.song_id, entry.offset));
         let _guard = lock.lock().await;
-        if let Some(p) = self.cache.get(song.song_id, &entry.path)? {
+        if let Some(p) = self.cache.get(song.song_id, &entry.path, entry.size)? {
             return Ok(p);
         }
         let data = self.api.pre_file(song.song_id, &entry.path).await?;
         verify_entry(entry, &data)?;
-        let path = self.cache.put(song.song_id, &entry.path, &data)?;
+        let path = self
+            .cache
+            .put(song.song_id, &song.zip_sha256, &entry.path, &data)?;
         self.evict_in_background();
         Ok(path)
     }
@@ -105,7 +110,7 @@ impl Fetcher {
         if song
             .files
             .iter()
-            .all(|f| self.cache.contains(song.song_id, &f.path))
+            .all(|f| self.cache.contains(song.song_id, &f.path, f.size))
         {
             return Ok(());
         }
@@ -209,6 +214,11 @@ fn verify_entry(entry: &FileEntry, data: &[u8]) -> Result<()> {
 fn extract_song(cache: &Cache, song: &SongInfo, zip_path: &std::path::Path) -> Result<()> {
     let file = std::fs::File::open(zip_path)?;
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))?;
+    let sizes: HashMap<&str, u64> = song
+        .files
+        .iter()
+        .map(|e| (e.path.as_str(), e.size))
+        .collect();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
         if f.is_dir() {
@@ -222,12 +232,16 @@ fn extract_song(cache: &Cache, song: &SongInfo, zip_path: &std::path::Path) -> R
             );
             continue;
         }
-        if cache.contains(song.song_id, &name) {
+        // 매니페스트에 있고 크기가 같은 파일만 이미 받은 것으로 본다.
+        if sizes
+            .get(name.as_str())
+            .is_some_and(|&size| cache.contains(song.song_id, &name, size))
+        {
             continue;
         }
         let mut data = Vec::with_capacity(f.size() as usize);
         f.read_to_end(&mut data)?;
-        cache.put(song.song_id, &name, &data)?;
+        cache.put(song.song_id, &song.zip_sha256, &name, &data)?;
     }
     Ok(())
 }

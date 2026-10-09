@@ -239,7 +239,11 @@ impl EbmsFs {
                 read_at(&self.paths.pre_chunk(chunk_id), data_offset + offset, len).map(Plan::Done)
             }
             Source::Asset { entry, .. } => {
-                match self.fetcher.cache().get(song.song_id, &entry.path)? {
+                match self
+                    .fetcher
+                    .cache()
+                    .get(song.song_id, &entry.path, entry.size)?
+                {
                     Some(path) => read_at(&path, offset, len).map(Plan::Done),
                     None => Ok(Plan::Fetch { song, entry, len }),
                 }

@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS cache_entry(
     pinned INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (song_id, path)
 );
+CREATE TABLE IF NOT EXISTS cache_song(
+    song_id INTEGER PRIMARY KEY,
+    zip_sha256 TEXT NOT NULL      -- 캐시에 든 파일들이 나온 곡 zip. 매니페스트와 다르면 폐기
+);
 ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,6 +365,58 @@ impl Index {
             "DELETE FROM cache_entry WHERE song_id = ?1 AND path = ?2",
             params![song_id, path],
         )?;
+        Ok(())
+    }
+
+    /// 캐시에 든 곡 파일들의 곡 zip 해시.
+    pub fn cache_song_sha(&self, song_id: u32) -> Result<Option<String>> {
+        Ok(self
+            .con()
+            .query_row(
+                "SELECT zip_sha256 FROM cache_song WHERE song_id = ?1",
+                [song_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn cache_set_song_sha(&self, song_id: u32, zip_sha256: &str) -> Result<()> {
+        self.con().execute(
+            "INSERT OR REPLACE INTO cache_song (song_id, zip_sha256) VALUES (?1, ?2)",
+            params![song_id, zip_sha256],
+        )?;
+        Ok(())
+    }
+
+    /// 캐시에 파일이 있는 곡마다 `(song_id, 기록된 zip 해시, 매니페스트의 zip 해시)`.
+    /// 매니페스트에 없는 곡은 세 번째가 `None`.
+    pub fn cache_song_versions(&self) -> Result<Vec<(u32, Option<String>, Option<String>)>> {
+        let con = self.con();
+        let mut stmt = con.prepare(
+            "SELECT e.song_id, c.zip_sha256, json_extract(s.manifest, '$.zip_sha256')
+             FROM (SELECT DISTINCT song_id FROM cache_entry) e
+             LEFT JOIN cache_song c ON c.song_id = e.song_id
+             LEFT JOIN song s ON s.id = e.song_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 곡의 캐시 항목 경로.
+    pub fn cache_song_paths(&self, song_id: u32) -> Result<Vec<(String, u64)>> {
+        let con = self.con();
+        let mut stmt = con.prepare("SELECT path, size FROM cache_entry WHERE song_id = ?1")?;
+        let rows = stmt.query_map([song_id], |r| Ok((r.get(0)?, r.get::<_, i64>(1)? as u64)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 곡의 캐시 항목과 해시 기록을 모두 지운다.
+    pub fn cache_remove_song(&self, song_id: u32) -> Result<()> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        tx.execute("DELETE FROM cache_entry WHERE song_id = ?1", [song_id])?;
+        tx.execute("DELETE FROM cache_song WHERE song_id = ?1", [song_id])?;
+        tx.commit()?;
         Ok(())
     }
 
