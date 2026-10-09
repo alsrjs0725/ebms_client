@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 /// ```text
 /// <root>/index.sqlite
 /// <root>/charts/chart_chunk_00000.zip
+/// <root>/pre/pre_chunk_00000.zip
 /// <root>/cache/<song_id>/<path>
 /// <root>/tmp/
 /// ```
@@ -19,7 +20,7 @@ impl Paths {
     }
 
     pub fn create_dirs(&self) -> std::io::Result<()> {
-        for dir in [self.charts(), self.cache(), self.tmp()] {
+        for dir in [self.charts(), self.pre(), self.cache(), self.tmp()] {
             std::fs::create_dir_all(dir)?;
         }
         Ok(())
@@ -35,6 +36,15 @@ impl Paths {
 
     pub fn chart_chunk(&self, id: u32) -> PathBuf {
         self.charts().join(format!("chart_chunk_{id:05}.zip"))
+    }
+
+    /// 사전 청크(곡들의 배너·프리뷰 등). 캐시와 달리 지우지 않는다.
+    pub fn pre(&self) -> PathBuf {
+        self.root.join("pre")
+    }
+
+    pub fn pre_chunk(&self, id: u32) -> PathBuf {
+        self.pre().join(format!("pre_chunk_{id:05}.zip"))
     }
 
     pub fn cache(&self) -> PathBuf {

@@ -217,7 +217,7 @@ enum Plan {
 }
 
 impl EbmsFs {
-    /// 차트와 캐시에 있는 에셋은 바로 읽는다. 받아야 하면 [`Plan::Fetch`].
+    /// 차트, 사전 청크, 캐시에 있는 에셋은 바로 읽는다. 받아야 하면 [`Plan::Fetch`].
     fn plan(&self, ino: Ino, offset: u64, size: u32) -> Result<Plan> {
         let Some((song, file_size, source)) = self.tree().file(ino) else {
             return Err(Error::Other(format!("not a file: {ino}")));
@@ -232,6 +232,12 @@ impl EbmsFs {
                 data_offset,
             } => read_at(&self.paths.chart_chunk(chunk_id), data_offset + offset, len)
                 .map(Plan::Done),
+            Source::Pre {
+                chunk_id,
+                data_offset,
+            } => {
+                read_at(&self.paths.pre_chunk(chunk_id), data_offset + offset, len).map(Plan::Done)
+            }
             Source::Asset { entry, .. } => {
                 match self.fetcher.cache().get(song.song_id, &entry.path)? {
                     Some(path) => read_at(&path, offset, len).map(Plan::Done),

@@ -6,7 +6,7 @@ EBMS 서버의 곡을 가상 드라이브로 보여주고, 구동기(beatoraja �
 
 | 크레이트 | 내용 |
 | --- | --- |
-| `ebms-core` | 서버 API, 로그인·세션키, 서버 목록, 차트·매니페스트 동기화, 가상 트리, 요청 시 다운로드, 캐시 |
+| `ebms-core` | 서버 API, 로그인·세션키, 서버 목록, 동기화(차트·매니페스트·사전 청크), 가상 트리, 요청 시 다운로드, 캐시 |
 | `ebms-vfs-fuse` | Linux FUSE 백엔드 |
 | `ebms-vfs-winfsp` | Windows WinFsp 백엔드 |
 | `ebms-cli` | 터미널에서 동기화·조회·마운트 (`ebms`) |
@@ -33,7 +33,7 @@ ebms() { cargo run -q -p ebms-cli -- "$@"; }
 ebms server add http://localhost:8000      # 서버 추가 (여러 개 가능)
 ebms login                                 # 브라우저로 로그인, 세션키는 OS 키체인에 저장
 ebms whoami                                # 계정, 남은 티켓, 이번 달 사전 다운로드 사용량
-ebms sync                                  # 차트 청크·매니페스트 동기화
+ebms sync                                  # 차트·매니페스트·사전 청크 동기화 (사전 다운로드)
 ebms ls                                    # 곡 폴더 목록
 ebms cat "00001 Artist - Title/bgm01.wav" > out.wav
 ebms mount E:                              # 서버별 폴더로 마운트 (Linux는 폴더 경로, Ctrl-C로 해제)

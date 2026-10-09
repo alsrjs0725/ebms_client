@@ -9,7 +9,7 @@ use crate::manifest::SongManifest;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS chunk(
-    kind TEXT NOT NULL,          -- 'chart' | 'manifest'
+    kind TEXT NOT NULL,          -- 'chart' | 'manifest' | 'pre'
     id INTEGER NOT NULL,
     sha256 TEXT NOT NULL,
     PRIMARY KEY (kind, id)
@@ -23,6 +23,16 @@ CREATE TABLE IF NOT EXISTS chart(
     data_offset INTEGER NOT NULL  -- 청크 zip(무압축) 안 데이터 시작 위치
 );
 CREATE INDEX IF NOT EXISTS chart_chunk ON chart(chunk_id);
+CREATE TABLE IF NOT EXISTS pre_file(
+    song_id INTEGER NOT NULL,
+    path TEXT NOT NULL,           -- 곡 zip 안 경로
+    size INTEGER NOT NULL,
+    crc32 INTEGER NOT NULL,
+    chunk_id INTEGER NOT NULL,
+    data_offset INTEGER NOT NULL, -- 사전 청크 zip(무압축) 안 데이터 시작 위치
+    PRIMARY KEY (song_id, path)
+);
+CREATE INDEX IF NOT EXISTS pre_file_chunk ON pre_file(chunk_id);
 CREATE TABLE IF NOT EXISTS song(
     id INTEGER PRIMARY KEY,
     manifest_chunk INTEGER NOT NULL,
@@ -43,6 +53,7 @@ CREATE TABLE IF NOT EXISTS cache_entry(
 pub enum ChunkKind {
     Chart,
     Manifest,
+    Pre,
 }
 
 impl ChunkKind {
@@ -50,6 +61,7 @@ impl ChunkKind {
         match self {
             ChunkKind::Chart => "chart",
             ChunkKind::Manifest => "manifest",
+            ChunkKind::Pre => "pre",
         }
     }
 }
@@ -59,6 +71,17 @@ impl ChunkKind {
 pub struct ChartRow {
     pub sha256: String,
     pub ext: String,
+    pub size: u64,
+    pub crc32: u32,
+    pub chunk_id: u32,
+    pub data_offset: u64,
+}
+
+/// 사전 청크 zip 안의 사전 파일 하나(배너·프리뷰 등).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreRow {
+    pub song_id: u32,
+    pub path: String,
     pub size: u64,
     pub crc32: u32,
     pub chunk_id: u32,
@@ -145,6 +168,66 @@ impl Index {
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// 사전 청크 하나의 파일 목록과 해시를 한 트랜잭션으로 바꾼다.
+    pub fn replace_pre_chunk(&self, chunk_id: u32, sha256: &str, files: &[PreRow]) -> Result<()> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        tx.execute("DELETE FROM pre_file WHERE chunk_id = ?1", [chunk_id])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO pre_file (song_id, path, size, crc32, chunk_id, data_offset)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for f in files {
+                stmt.execute(params![
+                    f.song_id,
+                    f.path,
+                    f.size as i64,
+                    f.crc32,
+                    f.chunk_id,
+                    f.data_offset as i64
+                ])?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO chunk (kind, id, sha256) VALUES ('pre', ?1, ?2)",
+            params![chunk_id, sha256],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn remove_pre_chunk(&self, chunk_id: u32) -> Result<()> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        tx.execute("DELETE FROM pre_file WHERE chunk_id = ?1", [chunk_id])?;
+        tx.execute(
+            "DELETE FROM chunk WHERE kind = 'pre' AND id = ?1",
+            [chunk_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 곡의 로컬 사전 파일.
+    pub fn pre_files(&self, song_id: u32) -> Result<Vec<PreRow>> {
+        let con = self.con();
+        let mut stmt = con.prepare_cached(
+            "SELECT path, size, crc32, chunk_id, data_offset FROM pre_file WHERE song_id = ?1",
+        )?;
+        let rows = stmt.query_map([song_id], |r| {
+            Ok(PreRow {
+                song_id,
+                path: r.get(0)?,
+                size: r.get::<_, i64>(1)? as u64,
+                crc32: r.get(2)?,
+                chunk_id: r.get(3)?,
+                data_offset: r.get::<_, i64>(4)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// 매니페스트 청크 하나의 곡 목록과 해시를 한 트랜잭션으로 바꾼다.
