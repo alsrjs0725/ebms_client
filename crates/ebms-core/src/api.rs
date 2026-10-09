@@ -33,6 +33,21 @@ pub struct Version {
     pub auth: Vec<String>,
 }
 
+/// `GET /api/notices`의 공지 하나.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Notice {
+    pub id: u64,
+    pub title: String,
+    /// 일반 텍스트
+    #[serde(default)]
+    pub body: String,
+    /// `info` | `warning`
+    #[serde(default)]
+    pub level: String,
+    /// unix 초. 공지를 고치면 바뀐다.
+    pub updated_at: i64,
+}
+
 /// `POST /api/auth/client/token` 응답.
 #[derive(Debug, Deserialize)]
 pub struct Token {
@@ -180,6 +195,15 @@ impl Api {
 
     pub async fn version(&self) -> Result<Version> {
         Ok(self.get("/api/version").await?.json().await?)
+    }
+
+    /// 지금 게시 중인 공지. 공지 API가 없는 이전 서버면 빈 목록.
+    pub async fn notices(&self) -> Result<Vec<Notice>> {
+        match self.get("/api/notices").await {
+            Ok(resp) => Ok(resp.json().await?),
+            Err(Error::Status { status: 404, .. }) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     // ---- 로그인 ----

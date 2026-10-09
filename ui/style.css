@@ -91,3 +91,5 @@ button:disabled { opacity: .5; cursor: default; }
 }
 
 footer { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; }
+
+.notice .body { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
