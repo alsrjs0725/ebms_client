@@ -41,6 +41,13 @@ pub struct ServerEntry {
     pub name: String,
 }
 
+impl ServerEntry {
+    /// 루프백이 아닌 `http://` 서버. 세션키가 평문으로 오간다.
+    pub fn is_insecure(&self) -> bool {
+        is_insecure_url(&self.url)
+    }
+}
+
 impl Config {
     /// 곡 전체를 받을 수 있는 프로그램 이름 (기본 구동기 + `extra_players`).
     pub fn players(&self) -> Vec<String> {
@@ -131,6 +138,26 @@ pub fn normalize_url(url: &str) -> Result<String> {
         return Err(Error::Config(format!("bad url {url}")));
     }
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+/// 루프백(localhost, 127.0.0.0/8, ::1)이 아닌 `http://` 주소인지.
+/// 이런 서버는 세션키가 평문으로 오가므로 막지는 않고 경고한다.
+pub fn is_insecure_url(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = parsed.host_str() else {
+        return true;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    !loopback
 }
 
 fn slug(s: &str) -> String {
@@ -247,6 +274,26 @@ fn purge_dir(dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insecure_url_is_non_loopback_http() {
+        for url in [
+            "http://ebms.example.com",
+            "http://192.168.0.10:8000",
+            "http://[2001:db8::1]:8000",
+        ] {
+            assert!(is_insecure_url(url), "{url}");
+        }
+        for url in [
+            "https://ebms.example.com",
+            "http://127.0.0.1:8000",
+            "http://localhost:8000",
+            "http://LOCALHOST",
+            "http://[::1]:8000",
+        ] {
+            assert!(!is_insecure_url(url), "{url}");
+        }
+    }
 
     #[test]
     fn add_find_remove() {

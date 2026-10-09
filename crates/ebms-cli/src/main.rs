@@ -274,6 +274,11 @@ fn server_cmd(rt: &tokio::runtime::Runtime, app: &mut App, cmd: ServerCmd) -> an
             let entry = app.config.add(&url, name.as_deref())?.clone();
             app.dir.save_config(&app.config)?;
             println!("added {} ({}) as {}", entry.name, entry.url, entry.id);
+            if entry.is_insecure() {
+                eprintln!(
+                    "warning: unencrypted http address, the session key is sent in plain text"
+                );
+            }
             if !version.auth.is_empty() {
                 println!("login: ebms login --server {}", entry.id);
             }

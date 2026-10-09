@@ -28,6 +28,8 @@ pub struct ServerView {
     id: String,
     name: String,
     url: String,
+    /// 루프백이 아닌 `http://` 주소. 세션키가 평문으로 오가므로 경고한다.
+    insecure: bool,
     /// `logged_in` | `needs_login`(세션 만료) | `logged_out`
     login: &'static str,
     /// 계정, 연결된 OAuth, 남은 티켓, 이번 달 사전 다운로드
@@ -75,6 +77,7 @@ async fn view(server: Arc<Server>) -> ServerView {
         id: server.entry.id.clone(),
         name: server.entry.name.clone(),
         url: server.entry.url.clone(),
+        insecure: server.entry.is_insecure(),
         login,
         me,
         error,
