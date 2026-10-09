@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
@@ -16,6 +17,12 @@ use crate::{Error, Result};
 
 /// 서버가 Retry-After를 주지 않았을 때 기다릴 시간(초).
 const DEFAULT_RETRY_AFTER: u64 = 60;
+
+/// 응답 바이트가 이만큼 오지 않으면 연결이 멈춘 것으로 본다.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 사전 파일 하나를 받는 전체 시간 상한. 감속 중에도 프리뷰 몇 MB는 받을 수 있게 넉넉히.
+const PRE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Deserialize)]
 pub struct Version {
@@ -95,7 +102,8 @@ impl Api {
     pub fn new(base: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("ebms-client/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(READ_TIMEOUT)
             .build()?;
         Ok(Self {
             base: base.trim_end_matches('/').to_string(),
@@ -282,7 +290,11 @@ impl Api {
         let mut url = Url::parse(&self.url(&format!("/api/pre/song/{song_id}/file")))
             .map_err(|e| Error::Config(format!("bad server url {}: {e}", self.base)))?;
         url.query_pairs_mut().append_pair("path", path);
-        let resp = self.request(Method::GET, url).send().await?;
+        let resp = self
+            .request(Method::GET, url)
+            .timeout(PRE_FILE_TIMEOUT)
+            .send()
+            .await?;
         Ok(self.check(resp, StatusCode::OK)?.bytes().await?)
     }
 

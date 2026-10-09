@@ -1,6 +1,7 @@
 //! Linux FUSE 백엔드 (macOS는 추후 검토). [`ebms_core::fs::ReadOnlyFs`]를 읽기 전용으로 마운트한다.
 //! 보통 서버별 최상위 폴더로 합친 [`ebms_core::drive::Drive`]를 마운트한다.
 //! 읽기를 요청한 프로세스를 `/proc`에서 확인해, 구동기만 곡 전체 다운로드(티켓 1개)를 일으킬 수 있게 한다.
+//! 다운로드가 필요한 읽기는 `reply`를 tokio 작업에 넘기고 FUSE 스레드는 바로 다음 요청을 처리한다.
 #![cfg(target_os = "linux")]
 
 use std::ffi::OsStr;
@@ -25,18 +26,19 @@ const TTL: Duration = Duration::from_secs(60);
 struct FuseFs {
     fs: Arc<dyn ReadOnlyFs>,
     /// 곡 전체를 받을 수 있는 프로그램 이름 ([`ebms_core::players`])
-    players: Vec<String>,
+    players: Arc<[String]>,
     uid: u32,
     gid: u32,
 }
 
 /// FUSE 요청을 보낸 프로세스. 곡 다운로드가 필요할 때만 `/proc`을 읽는다.
-struct ProcCaller<'a> {
+/// 다운로드가 끝난 뒤 런타임 스레드에서도 쓰므로 데이터를 소유한다.
+struct ProcCaller {
     pid: u32,
-    players: &'a [String],
+    players: Arc<[String]>,
 }
 
-impl ProcCaller<'_> {
+impl ProcCaller {
     fn exe(&self) -> Option<String> {
         std::fs::read_link(format!("/proc/{}/exe", self.pid))
             .ok()
@@ -55,7 +57,7 @@ impl ProcCaller<'_> {
     }
 }
 
-impl Caller for ProcCaller<'_> {
+impl Caller for ProcCaller {
     fn name(&self) -> String {
         let comm = std::fs::read_to_string(format!("/proc/{}/comm", self.pid));
         let comm = comm.as_deref().map(str::trim).unwrap_or("?");
@@ -66,7 +68,7 @@ impl Caller for ProcCaller<'_> {
     }
 
     fn is_player(&self) -> bool {
-        ebms_core::players::is_player(self.players, self.exe().as_deref(), &self.args())
+        ebms_core::players::is_player(&self.players, self.exe().as_deref(), &self.args())
     }
 }
 
@@ -136,19 +138,27 @@ impl Filesystem for FuseFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let caller = ProcCaller {
+        let caller = Box::new(ProcCaller {
             pid: req.pid(),
-            players: &self.players,
-        };
-        match self.fs.read(ino.into(), offset, size, &caller) {
-            Ok(data) => reply.data(&data),
-            // 이미 로그를 남겼다. 다른 프로그램에는 권한 없음으로 보인다.
-            Err(Error::NotPlayer { .. }) => reply.error(Errno::EACCES),
-            Err(e) => {
-                warn!(ino = u64::from(ino), %e, "read failed");
-                reply.error(Errno::EIO);
-            }
-        }
+            players: self.players.clone(),
+        });
+        let ino = u64::from(ino);
+        // 다운로드가 필요하면 바로 돌아오고, 끝난 뒤 런타임 스레드에서 응답한다.
+        self.fs.read_async(
+            ino,
+            offset,
+            size,
+            caller,
+            Box::new(move |result| match result {
+                Ok(data) => reply.data(&data),
+                // 이미 로그를 남겼다. 다른 프로그램에는 권한 없음으로 보인다.
+                Err(Error::NotPlayer { .. }) => reply.error(Errno::EACCES),
+                Err(e) => {
+                    warn!(ino, %e, "read failed");
+                    reply.error(Errno::EIO);
+                }
+            }),
+        );
     }
 
     /// 읽기 전용이라 비울 것이 없다.
@@ -258,14 +268,14 @@ pub fn spawn_mount(
     config.acl = SessionACL::Owner;
     clear_stale(mountpoint);
     std::fs::create_dir_all(mountpoint)?;
-    // 다운로드를 기다리는 읽기가 다른 요청을 막지 않도록 여러 스레드로.
+    // 다운로드는 런타임에 맡기지만, 캐시·차트 디스크 읽기가 서로 막지 않도록 여러 스레드로.
     config.n_threads = Some(8);
     // SAFETY: getuid/getgid는 실패하지 않는다.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     fuser::spawn_mount(
         FuseFs {
             fs,
-            players,
+            players: players.into(),
             uid,
             gid,
         },

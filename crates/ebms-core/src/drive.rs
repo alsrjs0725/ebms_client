@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
-use crate::fs::{Attr, Caller, DirEntry, Kind, ReadOnlyFs};
+use crate::fs::{Attr, Caller, DirEntry, Kind, ReadDone, ReadOnlyFs};
 use crate::tree::{Ino, ROOT};
 use crate::{Error, Result};
 
@@ -184,6 +184,20 @@ impl ReadOnlyFs for Drive {
             .member(ino)
             .ok_or_else(|| Error::Other(format!("not a file: {ino}")))?;
         fs.read(ino & INNER_MASK, offset, size, caller)
+    }
+
+    fn read_async(
+        &self,
+        ino: Ino,
+        offset: u64,
+        size: u32,
+        caller: Box<dyn Caller>,
+        done: ReadDone,
+    ) {
+        match self.member(ino) {
+            Some((fs, _)) => fs.read_async(ino & INNER_MASK, offset, size, caller, done),
+            None => done(Err(Error::Other(format!("not a file: {ino}")))),
+        }
     }
 }
 
