@@ -165,6 +165,11 @@ impl Hub {
         &self.dir
     }
 
+    /// 다운로드를 돌리는 런타임.
+    pub fn runtime(&self) -> Handle {
+        self.rt.clone()
+    }
+
     /// 서버별 최상위 폴더로 합친 가상 드라이브.
     pub fn drive(&self) -> Arc<Drive> {
         self.drive.clone()

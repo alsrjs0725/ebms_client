@@ -195,6 +195,6 @@ ebms_client/
 
 1. core: api + sync + index + tree + fetcher + cache, CLI로 검증 (서버 반영 완료로 바로 시작)
 2. Linux FUSE 백엔드: 같은 코어를 실제 마운트로 검증
-3. **Windows WinFsp 백엔드 + beatoraja 확인** (가장 큰 위험 요소. Windows 실기 필요)
+3. **Windows WinFsp 백엔드 + beatoraja 확인** (백엔드 완료: `ebms-vfs-winfsp`. 남음: Windows 실기에서 beatoraja 확인)
 4. 상주 프로세스, 설정 창 (완료: Linux 마운트, 서버·로그인 관리) / 남음: 자동 시작, 설치기(WinFsp 포함)
 5. macOS 검토

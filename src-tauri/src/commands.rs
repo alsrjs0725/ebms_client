@@ -1,6 +1,5 @@
 //! 설정 창이 부르는 명령. 오류는 문자열로 돌려 창에만 보여준다.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -158,10 +157,7 @@ pub fn drive_info(state: State<'_, AppState>) -> DriveInfo {
 
 #[tauri::command]
 pub fn set_mount_point(state: State<'_, AppState>, path: String) -> CmdResult<DriveInfo> {
-    let path = PathBuf::from(path.trim());
-    if !path.is_absolute() {
-        return Err("mount point must be an absolute path".into());
-    }
+    let path = crate::mount::parse_point(&path)?;
     state.mount.change(&state.hub, path).map_err(err)?;
     Ok(state.mount.info())
 }

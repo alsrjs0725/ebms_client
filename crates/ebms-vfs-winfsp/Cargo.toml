@@ -1,0 +1,22 @@
+[package]
+name = "ebms-vfs-winfsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ebms-core = { path = "../ebms-core" }
+tokio.workspace = true
+tracing.workspace = true
+winfsp = { version = "0.13", default-features = false, features = ["async-io"] }
+winfsp-sys = "0.12"
+windows = { version = "0.61", features = [
+    "Wdk_System_Threading",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+] }
