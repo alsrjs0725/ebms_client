@@ -15,6 +15,8 @@ pub struct SyncReport {
     pub chart_chunks_removed: Vec<u32>,
     pub manifest_chunks_updated: Vec<u32>,
     pub manifest_chunks_removed: Vec<u32>,
+    /// 받는 동안 서버에서 계속 바뀐 청크(곡 추가 중). 기존 로컬본을 두고 다음 동기화에 다시 받는다.
+    pub chart_chunks_skipped: Vec<u32>,
 }
 
 impl SyncReport {
@@ -55,12 +57,17 @@ async fn sync_charts(
             continue;
         }
         let tmp = paths.tmp_file(&format!("chart_chunk_{id:05}"));
-        let got = api.download_chart_chunk(id, &tmp).await?;
-        if &got != sha {
+        let Some(sha) = download_stable_chart_chunk(api, id, sha.clone(), &tmp).await? else {
+            warn!(
+                chunk_id = id,
+                "chart chunk kept changing on server, skipped"
+            );
+            report.chart_chunks_skipped.push(id);
+            continue;
+        };
+        if local.get(&id) == Some(&sha) && dest.exists() {
             let _ = std::fs::remove_file(&tmp);
-            return Err(Error::Integrity(format!(
-                "chart chunk {id}: expected {sha}, got {got}"
-            )));
+            continue;
         }
         let charts = {
             let tmp = tmp.clone();
@@ -69,7 +76,7 @@ async fn sync_charts(
                 .map_err(|e| Error::Other(e.to_string()))??
         };
         std::fs::rename(&tmp, &dest)?;
-        index.replace_chart_chunk(id, sha, &charts)?;
+        index.replace_chart_chunk(id, &sha, &charts)?;
         report.chart_chunks_updated.push(id);
     }
 
@@ -80,6 +87,36 @@ async fn sync_charts(
     }
     Ok(())
 }
+
+/// 서버의 마지막 청크는 곡을 추가할 때마다 다시 써진다. 받는 도중 바뀌면 해시가 어긋나므로
+/// 해시 목록을 다시 받아 바뀌었으면 새 해시로 다시 받는다. 끝까지 바뀌면 `None`.
+/// 해시가 그대로인데 어긋나면 진짜 손상이므로 에러.
+async fn download_stable_chart_chunk(
+    api: &Api,
+    id: u32,
+    mut sha: String,
+    tmp: &Path,
+) -> Result<Option<String>> {
+    for _ in 0..CHART_CHUNK_ATTEMPTS {
+        let got = api.download_chart_chunk(id, tmp).await?;
+        if got == sha {
+            return Ok(Some(sha));
+        }
+        let _ = std::fs::remove_file(tmp);
+        match api.chart_hash().await?.remove(&id) {
+            Some(now) if now == sha => {
+                return Err(Error::Integrity(format!(
+                    "chart chunk {id}: expected {sha}, got {got}"
+                )));
+            }
+            Some(now) => sha = now,
+            None => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+const CHART_CHUNK_ATTEMPTS: usize = 3;
 
 async fn sync_manifests(api: &Api, index: &Index, report: &mut SyncReport) -> Result<()> {
     let remote = api.manifest_hash().await?;

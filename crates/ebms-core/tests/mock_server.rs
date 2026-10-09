@@ -42,6 +42,10 @@ struct Server {
     /// 1회용 코드 → code_challenge
     codes: HashMap<String, String>,
     tickets: u32,
+    /// 남은 횟수만큼 청크 다운로드 직전에 그 청크에 차트를 덧붙인다. 곡 추가 중인 서버 흉내.
+    appends_on_download: usize,
+    /// 켜 두면 청크 본문을 해시 목록과 다르게 망가뜨려 보낸다.
+    corrupt_chart: bool,
 }
 
 #[derive(Default)]
@@ -188,8 +192,21 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             "/api/pre/chart/{id}",
             get(|State(s): State<AppState>, Path(id): Path<u32>, headers: HeaderMap| async move {
                 s.authorized(&headers)?;
-                s.counters.chart_chunk.fetch_add(1, Ordering::SeqCst);
-                Ok::<_, StatusCode>(s.server().chart_chunks[&id].clone())
+                let n = s.counters.chart_chunk.fetch_add(1, Ordering::SeqCst);
+                let mut server = s.server();
+                if server.appends_on_download > 0 {
+                    server.appends_on_download -= 1;
+                    let chart = format!("#TITLE Added {n}\r\n").into_bytes();
+                    let mut entries = zip_entries(&server.chart_chunks[&id]);
+                    entries.push((format!("{}.bms", sha(&chart)), chart));
+                    let refs: Vec<_> = entries.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+                    server.chart_chunks.insert(id, chart_chunk(&refs));
+                }
+                let mut body = server.chart_chunks[&id].clone();
+                if server.corrupt_chart {
+                    body.push(0);
+                }
+                Ok::<_, StatusCode>(body)
             }),
         )
         .route(
@@ -295,6 +312,19 @@ fn song_zip(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
 
 fn chart_chunk(charts: &[(&str, &[u8])]) -> Vec<u8> {
     make_zip(charts, zip::CompressionMethod::Stored)
+}
+
+/// zip의 항목 이름과 내용.
+fn zip_entries(zip_bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let mut z = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+    (0..z.len())
+        .map(|i| {
+            let mut f = z.by_index(i).unwrap();
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).unwrap();
+            (f.name().to_string(), data)
+        })
+        .collect()
 }
 
 /// 서버의 `zip_entries`와 같은 형식.
@@ -520,6 +550,42 @@ fn sync_is_incremental() {
     assert_eq!(third.chart_chunks_updated, vec![1]);
     assert_eq!(env.state.counters.chart_chunk.load(Ordering::SeqCst), 2);
     assert_eq!(env.client.index.charts().unwrap().len(), 3);
+}
+
+#[test]
+fn sync_retries_chart_chunk_changed_during_download() {
+    let env = setup(true);
+    env.state.server().appends_on_download = 1;
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.chart_chunks_updated, vec![0]);
+    assert!(report.chart_chunks_skipped.is_empty());
+    assert_eq!(env.state.counters.chart_chunk.load(Ordering::SeqCst), 2);
+    assert_eq!(env.client.index.charts().unwrap().len(), 3);
+    // 받은 해시가 서버 목록과 같으니 다음엔 받지 않는다
+    assert!(!env.rt.block_on(env.client.sync()).unwrap().changed());
+}
+
+#[test]
+fn sync_skips_chart_chunk_that_keeps_changing() {
+    let env = setup(true);
+    env.state.server().appends_on_download = usize::MAX;
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.chart_chunks_skipped, vec![0]);
+    assert!(report.chart_chunks_updated.is_empty());
+    assert_eq!(report.manifest_chunks_updated, vec![0]);
+
+    // 곡 추가가 끝나면 다음 동기화에서 받는다
+    env.state.server().appends_on_download = 0;
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.chart_chunks_updated, vec![0]);
+}
+
+#[test]
+fn sync_rejects_corrupt_chart_chunk() {
+    let env = setup(true);
+    env.state.server().corrupt_chart = true;
+    let err = env.rt.block_on(env.client.sync()).unwrap_err();
+    assert!(matches!(err, Error::Integrity(_)), "{err}");
 }
 
 #[test]
