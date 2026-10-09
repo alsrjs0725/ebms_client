@@ -577,7 +577,7 @@ pub fn song_dir_name(song_id: u32, folder: &str) -> String {
 
 /// 이름 한 개를 Windows에서 쓸 수 있게 바꾼다. 서버 문자열은 믿지 않는다.
 /// 금지 문자·제어 문자는 `_`, 끝의 점·공백은 제거, 예약어(`CON` 등)는 앞에 `_`,
-/// 길이는 확장자를 남기고 200자까지.
+/// 길이는 확장자를 남기고 UTF-16 200자까지 (Windows 이름 한도 255자 안).
 pub(crate) fn sanitize(name: &str) -> String {
     let mut s: String = name
         .chars()
@@ -602,15 +602,30 @@ pub(crate) fn sanitize(name: &str) -> String {
 
 const MAX_NAME_CHARS: usize = 200;
 
+/// Windows는 이름 길이를 UTF-16 단위로 센다. 이모지처럼 BMP 밖 글자는 2로 센다.
+fn utf16_len(s: &str) -> usize {
+    s.chars().map(char::len_utf16).sum()
+}
+
 fn truncate_keep_ext(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if utf16_len(s) <= max {
         return s.to_string();
     }
     let ext = match s.rfind('.') {
         Some(i) if i > 0 && s[i..].chars().count() <= 16 => &s[i..],
         _ => "",
     };
-    let stem: String = s.chars().take(max - ext.chars().count()).collect();
+    let mut left = max - utf16_len(ext);
+    let stem: String = s
+        .chars()
+        .take_while(|c| {
+            let fits = c.len_utf16() <= left;
+            if fits {
+                left -= c.len_utf16();
+            }
+            fits
+        })
+        .collect();
     stem + ext
 }
 
@@ -847,6 +862,10 @@ mod tests {
         let cut = sanitize(&long);
         assert_eq!(cut.chars().count(), MAX_NAME_CHARS);
         assert!(cut.ends_with(".wav"));
+        // BMP 밖 글자(이모지)는 UTF-16 2자로 센다.
+        let cut = sanitize(&format!("{}.ogg", "🎵".repeat(150)));
+        assert_eq!(cut.encode_utf16().count(), MAX_NAME_CHARS);
+        assert!(cut.ends_with(".ogg"));
     }
 
     #[test]

@@ -64,7 +64,7 @@ jobs:
       - name: GitHub Release 업로드
         run: |
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml)
-          notes="커밋 ${GITHUB_SHA::7} (${GITHUB_REF_NAME}). Linux 실행에는 libwebkit2gtk-4.1, fuse3 패키지가 필요합니다."
+          notes="커밋 ${GITHUB_SHA::7} (${GITHUB_REF_NAME}). Windows 가상 드라이브에는 WinFsp(https://winfsp.dev/rel/) 설치가 필요합니다. Linux 실행에는 libwebkit2gtk-4.1, fuse3 패키지가 필요합니다."
           if [ "$GITHUB_REF_NAME" = "release" ]; then
             tag="v$version"
             if gh release view "$tag" >/dev/null 2>&1; then

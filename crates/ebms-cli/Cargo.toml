@@ -19,3 +19,6 @@ tracing-subscriber.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ebms-vfs-fuse = { path = "../ebms-vfs-fuse" }
+
+[target.'cfg(windows)'.dependencies]
+ebms-vfs-winfsp = { path = "../ebms-vfs-winfsp" }

@@ -65,7 +65,7 @@ enum Cmd {
     ClearCache,
     /// 가상 드라이브로 마운트하고 주기적으로 동기화 (Ctrl-C로 종료).
     /// 서버마다 최상위 폴더 하나. --server를 주면 그 서버만
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     Mount {
         mountpoint: PathBuf,
         /// 동기화 간격(분)
@@ -245,7 +245,7 @@ fn main() -> anyhow::Result<()> {
             let freed = client.fetcher.cache().clear()?;
             println!("{}: cleared {freed} bytes", server.name);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         Cmd::Mount {
             mountpoint,
             sync_minutes,
@@ -402,7 +402,7 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn mount(
     rt: &tokio::runtime::Runtime,
     hub: ebms_core::hub::Hub,
@@ -423,8 +423,12 @@ fn mount(
     }
     // 서버에 연결되지 않아도 로컬 인덱스로 마운트한다.
     rt.block_on(hub.sync_all());
-    let _session = ebms_vfs_fuse::spawn_mount(drive, mountpoint, hub.config().players())
-        .with_context(|| format!("mount {}", mountpoint.display()))?;
+    #[cfg(target_os = "linux")]
+    let session = ebms_vfs_fuse::spawn_mount(drive, mountpoint, hub.config().players());
+    #[cfg(windows)]
+    let session =
+        ebms_vfs_winfsp::spawn_mount(drive, mountpoint, hub.config().players(), hub.runtime());
+    let _session = session.with_context(|| format!("mount {}", mountpoint.display()))?;
     tracing::info!(mountpoint = %mountpoint.display(), "mounted");
 
     rt.block_on(async move {
