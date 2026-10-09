@@ -74,6 +74,8 @@ pub struct Tree {
     inos: HashMap<String, Ino>,
     next_ino: Ino,
     songs: HashMap<u32, Arc<SongInfo>>,
+    /// (부모, 대소문자 접은 이름) → ino. 대소문자만 다른 이름이 겹치지 않게 한다.
+    folded: HashMap<(Ino, String), Ino>,
 }
 
 impl Tree {
@@ -88,6 +90,7 @@ impl Tree {
             inos: prev.map(|p| p.inos.clone()).unwrap_or_default(),
             next_ino: prev.map(|p| p.next_ino).unwrap_or(ROOT + 1),
             songs: HashMap::new(),
+            folded: HashMap::new(),
         };
         tree.inos.insert(String::new(), ROOT);
         tree.nodes.insert(
@@ -140,7 +143,7 @@ impl Tree {
                 continue;
             }
             for d in dirs {
-                parent = self.dir(parent, d);
+                parent = self.dir(parent, &entry_name(d));
             }
 
             let mut source = Source::Asset {
@@ -160,12 +163,12 @@ impl Tree {
                     };
                 }
             }
-            self.file(parent, file_name, entry.size, source);
+            self.file(parent, &entry_name(file_name), entry.size, source);
         }
 
         // 곡 zip에 없는 차트(나중에 연결된 차트)는 sha256 이름으로 보여준다.
         for c in unmatched {
-            let name = format!("{}.{}", c.sha256, c.ext);
+            let name = entry_name(&format!("{}.{}", c.sha256, c.ext));
             self.file(
                 song_dir,
                 &name,
@@ -197,12 +200,14 @@ impl Tree {
         ino
     }
 
+    /// 대소문자만 다른 폴더는 하나로 합친다.
     fn dir(&mut self, parent: Ino, name: &str) -> Ino {
-        if let Some(Node::Dir { children, .. }) = self.nodes.get(&parent)
-            && let Some(&ino) = children.get(name)
+        if let Some(&ino) = self.folded.get(&(parent, fold(name)))
+            && self.nodes.get(&ino).is_some_and(Node::is_dir)
         {
             return ino;
         }
+        let name = &self.free_name(parent, name);
         let ino = self.ino_for(self.path_of(parent, name));
         self.nodes.insert(
             ino,
@@ -216,12 +221,9 @@ impl Tree {
         ino
     }
 
+    /// 이름이 겹치면 `a (2).wav`처럼 번호를 붙인다.
     fn file(&mut self, parent: Ino, name: &str, size: u64, source: Source) {
-        if let Some(Node::Dir { children, .. }) = self.nodes.get(&parent)
-            && children.contains_key(name)
-        {
-            return; // 같은 이름이 이미 있음
-        }
+        let name = &self.free_name(parent, name);
         let ino = self.ino_for(self.path_of(parent, name));
         self.nodes.insert(
             ino,
@@ -238,7 +240,24 @@ impl Tree {
     fn link(&mut self, parent: Ino, name: &str, ino: Ino) {
         if let Some(Node::Dir { children, .. }) = self.nodes.get_mut(&parent) {
             children.insert(name.to_string(), ino);
+            self.folded.insert((parent, fold(name)), ino);
         }
+    }
+
+    /// `parent` 안에서 대소문자를 무시해도 겹치지 않는 이름.
+    fn free_name(&self, parent: Ino, name: &str) -> String {
+        let taken = |n: &str| self.folded.contains_key(&(parent, fold(n)));
+        if !taken(name) {
+            return name.to_string();
+        }
+        let (stem, ext) = match name.rfind('.') {
+            Some(i) if i > 0 => name.split_at(i),
+            _ => (name, ""),
+        };
+        (2..)
+            .map(|n| format!("{stem} ({n}){ext}"))
+            .find(|n| !taken(n))
+            .expect("unbounded")
     }
 
     pub fn get(&self, ino: Ino) -> Option<&Node> {
@@ -301,6 +320,16 @@ impl Tree {
     }
 }
 
+fn fold(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// zip 안 폴더·파일 이름을 드라이브에 보일 이름으로.
+fn entry_name(name: &str) -> String {
+    let clean = sanitize(name);
+    if clean.is_empty() { "_".into() } else { clean }
+}
+
 /// `{song_id:05} {folder}`. OS에서 쓸 수 없는 문자는 `_`로 바꾼다.
 pub fn song_dir_name(song_id: u32, folder: &str) -> String {
     let clean = sanitize(folder);
@@ -311,6 +340,9 @@ pub fn song_dir_name(song_id: u32, folder: &str) -> String {
     }
 }
 
+/// 이름 한 개를 Windows에서 쓸 수 있게 바꾼다. 서버 문자열은 믿지 않는다.
+/// 금지 문자·제어 문자는 `_`, 끝의 점·공백은 제거, 예약어(`CON` 등)는 앞에 `_`,
+/// 길이는 확장자를 남기고 200자까지.
 pub(crate) fn sanitize(name: &str) -> String {
     let mut s: String = name
         .chars()
@@ -321,13 +353,45 @@ pub(crate) fn sanitize(name: &str) -> String {
                 c
             }
         })
-        .take(200)
         .collect();
+    s = truncate_keep_ext(s.trim_start(), MAX_NAME_CHARS);
     // Windows는 끝의 점·공백을 허용하지 않는다.
     while s.ends_with(['.', ' ']) {
         s.pop();
     }
-    s.trim_start().to_string()
+    if is_reserved(&s) {
+        s.insert(0, '_');
+    }
+    s
+}
+
+const MAX_NAME_CHARS: usize = 200;
+
+fn truncate_keep_ext(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let ext = match s.rfind('.') {
+        Some(i) if i > 0 && s[i..].chars().count() <= 16 => &s[i..],
+        _ => "",
+    };
+    let stem: String = s.chars().take(max - ext.chars().count()).collect();
+    stem + ext
+}
+
+/// `CON`, `nul.txt`, `COM1 .wav`처럼 Windows가 장치로 해석하는 이름.
+fn is_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end();
+    let upper = stem.to_ascii_uppercase();
+    match upper.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        _ => upper
+            .strip_prefix("COM")
+            .or_else(|| upper.strip_prefix("LPT"))
+            .is_some_and(|n| {
+                (n.len() == 1 && n.as_bytes()[0].is_ascii_digit()) || matches!(n, "¹" | "²" | "³")
+            }),
+    }
 }
 
 #[cfg(test)]
@@ -429,5 +493,63 @@ mod tests {
     fn dir_names() {
         assert_eq!(song_dir_name(3, "3"), "00003");
         assert_eq!(song_dir_name(3, "a:b. "), "00003 a_b");
+    }
+
+    #[test]
+    fn sanitizes_windows_names() {
+        assert_eq!(sanitize("a.wav:x"), "a.wav_x");
+        assert_eq!(sanitize("x. "), "x");
+        assert_eq!(sanitize("CON"), "_CON");
+        assert_eq!(sanitize("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize("com1 .wav"), "_com1 .wav");
+        assert_eq!(sanitize("LPT²"), "_LPT²");
+        assert_eq!(sanitize("console.wav"), "console.wav");
+        assert_eq!(sanitize("COM10"), "COM10");
+        assert_eq!(sanitize("가나다"), "가나다");
+        let long = format!("{}.wav", "가".repeat(300));
+        let cut = sanitize(&long);
+        assert_eq!(cut.chars().count(), MAX_NAME_CHARS);
+        assert!(cut.ends_with(".wav"));
+    }
+
+    #[test]
+    fn hostile_entry_names() {
+        let a = "a".repeat(64);
+        let songs = vec![SongManifest {
+            song_id: 1,
+            folder: "s".into(),
+            zip_size: 0,
+            zip_sha256: String::new(),
+            charts: vec![a.clone()],
+            files: vec![
+                entry("CON", 1, 1),
+                entry("x.wav:evil", 2, 2),
+                entry("A.wav", 3, 3),
+                entry("a.wav", 4, 4),
+                entry("x.", 5, 5),
+                entry("x", 6, 6),
+                entry("Sub/1.ogg", 7, 7),
+                entry("sub/2.ogg", 8, 8),
+            ],
+        }];
+        let tree = Tree::build(&songs, &HashMap::new(), None);
+        let song = tree.resolve("00001 s").unwrap();
+        let mut names: Vec<&str> = tree.children(song).unwrap().map(|(n, _)| n).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "A.wav",
+                "Sub",
+                "_CON",
+                "a (2).wav",
+                "x",
+                "x (2)",
+                "x.wav_evil"
+            ]
+        );
+        // 대소문자만 다른 폴더는 합쳐진다.
+        let sub = tree.resolve("00001 s/Sub").unwrap();
+        assert_eq!(tree.children(sub).unwrap().count(), 2);
     }
 }

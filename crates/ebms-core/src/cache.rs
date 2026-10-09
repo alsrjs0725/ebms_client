@@ -1,10 +1,12 @@
-//! 받은 에셋 캐시. `<cache>/<song_id>/<path>`에 원본 그대로 저장한다.
+//! 받은 에셋 캐시. `<cache>/<song_id>/<sha256(path)>`에 원본 그대로 저장한다.
+//! 서버가 준 경로를 파일명으로 쓰지 않으므로 OS 파일명 규칙(예약어·ADS·대소문자)에 걸리지 않는다.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
 use crate::index::Index;
@@ -34,16 +36,17 @@ impl Cache {
         }
     }
 
-    /// 캐시 안 경로. zip 경로가 캐시 밖을 가리키면 오류.
+    /// 캐시 안 경로. 파일명은 zip 경로의 해시다. 이상한 zip 경로는 오류.
     pub fn path(&self, song_id: u32, rel: &str) -> Result<PathBuf> {
-        let rel = Path::new(rel);
-        if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
+        if Path::new(rel)
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_)))
+        {
             return Err(Error::Other(format!(
-                "unsafe path in song {song_id}: {}",
-                rel.display()
+                "unsafe path in song {song_id}: {rel}"
             )));
         }
-        Ok(self.root.join(song_id.to_string()).join(rel))
+        Ok(self.root.join(song_id.to_string()).join(file_key(rel)))
     }
 
     /// 캐시에 있으면 경로를 돌려주고 접근 시각을 갱신한다.
@@ -159,6 +162,11 @@ impl Cache {
     }
 }
 
+/// zip 경로 → 캐시 파일명.
+fn file_key(rel: &str) -> String {
+    hex::encode(Sha256::digest(rel.as_bytes()))
+}
+
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -176,6 +184,27 @@ fn unique() -> u64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_path_uses_hash() -> Result<()> {
+        let dir = tempdir()?;
+        let index = Arc::new(Index::open(&dir.path().join("index.db"))?);
+        let cache = Cache::new(dir.path().join("cache"), dir.path().join("tmp"), index, 0);
+
+        for rel in ["CON", "a.wav:x", "x.", "sub/A.wav"] {
+            let p = cache.path(7, rel)?;
+            assert_eq!(
+                p.parent(),
+                Some(dir.path().join("cache").join("7").as_path())
+            );
+            assert_eq!(p.file_name().unwrap().len(), 64);
+        }
+        assert_ne!(cache.path(7, "A.wav")?, cache.path(7, "a.wav")?);
+        assert_ne!(cache.path(7, "x.")?, cache.path(7, "x")?);
+        assert!(cache.path(7, "../x").is_err());
+        assert!(cache.path(7, "/x").is_err());
+        Ok(())
+    }
 
     #[test]
     fn test_evict_handles_unremovable_file() -> Result<()> {
