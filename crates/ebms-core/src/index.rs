@@ -436,21 +436,17 @@ impl Index {
             })? as u64)
     }
 
-    /// 고정되지 않은 항목을 오래된 순으로.
-    pub fn cache_eviction_candidates(&self, limit: usize) -> Result<Vec<CacheRow>> {
+    /// 고정되지 않은 곡을 마지막 접근(곡 파일 중 가장 최근)이 오래된 순으로 `(song_id, 크기 합)`.
+    /// 파일 하나라도 고정된 곡은 빠진다.
+    pub fn cache_eviction_songs(&self, limit: usize) -> Result<Vec<(u32, u64)>> {
         let con = self.con();
         let mut stmt = con.prepare(
-            "SELECT song_id, path, size, last_access, pinned FROM cache_entry
-             WHERE pinned = 0 ORDER BY last_access LIMIT ?1",
+            "SELECT song_id, SUM(size) FROM cache_entry
+             GROUP BY song_id HAVING MAX(pinned) = 0
+             ORDER BY MAX(last_access) LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit as i64], |r| {
-            Ok(CacheRow {
-                song_id: r.get(0)?,
-                path: r.get(1)?,
-                size: r.get::<_, i64>(2)? as u64,
-                last_access: r.get(3)?,
-                pinned: r.get(4)?,
-            })
+            Ok((r.get(0)?, r.get::<_, i64>(1)? as u64))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

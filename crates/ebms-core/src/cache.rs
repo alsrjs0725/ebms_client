@@ -173,46 +173,36 @@ impl Cache {
         Ok(freed)
     }
 
-    /// 한도를 넘으면 오래된 항목부터 지운다.
+    /// 한도를 넘으면 오래 안 쓴 곡부터 지운다.
     pub fn evict(&self) -> Result<u64> {
         self.evict_to(self.limit)
     }
 
-    /// "항상 보관"이 아닌 항목을 모두 지운다. 읽는 중이라 못 지운 파일은 남긴다.
+    /// "항상 보관"이 아닌 곡을 모두 지운다. 읽는 중이라 못 지운 파일은 남긴다.
     pub fn clear(&self) -> Result<u64> {
         let freed = self.evict_to(0)?;
         self.remove_empty_dirs();
         Ok(freed)
     }
 
-    /// 오래된 항목부터 `limit` 이하가 될 때까지 지운다.
+    /// 오래 안 쓴 곡부터 `limit` 이하가 될 때까지 곡 단위로 지운다.
+    /// 곡 일부만 남으면 다음 플레이 때 곡 zip 전체를 다시 받아(티켓 1개) 남은 파일도 소용없다.
     fn evict_to(&self, limit: u64) -> Result<u64> {
         let _guard = self.evict_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut total = self.index.cache_total()?;
         let mut freed = 0;
         while total > limit {
-            let batch = self.index.cache_eviction_candidates(256)?;
-            let mut progressed = false;
-            for row in &batch {
+            let batch = self.index.cache_eviction_songs(256)?;
+            // 지울 곡이 없으면(모두 고정) 멈춘다. 지운 곡은 파일을 못 지워도 항목이 빠지므로 다시 나오지 않는다.
+            if batch.is_empty() {
+                break;
+            }
+            for (song_id, size) in batch {
                 if total <= limit {
                     break;
                 }
-                if let Ok(path) = self.path(row.song_id, &row.path) {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            warn!(?path, %e, "cache eviction failed");
-                        }
-                    } else {
-                        freed += row.size;
-                    }
-                }
-                self.index.cache_remove(row.song_id, &row.path)?;
-                total = total.saturating_sub(row.size);
-                progressed = true;
-            }
-            // 지울 게 없거나 모두 실패하면 같은 후보만 다시 나오므로 멈춘다.
-            if !progressed {
-                break;
+                freed += self.remove_song(song_id)?;
+                total = total.saturating_sub(size);
             }
         }
         Ok(freed)
@@ -404,6 +394,43 @@ mod tests {
         cache.put(1, "a2", "y.wav", b"new")?;
         assert!(cache.get(1, "x.wav", 4)?.is_none());
         assert!(cache.get(1, "y.wav", 3)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_evict_whole_songs_by_last_access() -> Result<()> {
+        let dir = tempdir()?;
+        let index = Arc::new(Index::open(&dir.path().join("index.db"))?);
+        std::fs::create_dir_all(dir.path().join("tmp"))?;
+        let cache = Cache::new(
+            dir.path().join("cache"),
+            dir.path().join("tmp"),
+            index.clone(),
+            30,
+        );
+        for song_id in 1..=3 {
+            cache.put(song_id, "z", "a.wav", &[0; 10])?;
+            cache.put(song_id, "z", "b.wav", &[0; 5])?;
+        }
+        // 곡 1: 파일 하나만 최근에 읽음 → 곡 전체가 최근으로 친다.
+        index.cache_touch(1, "a.wav", 100)?;
+        index.cache_touch(1, "b.wav", 300)?;
+        index.cache_touch(2, "a.wav", 200)?;
+        index.cache_touch(2, "b.wav", 200)?;
+        index.cache_touch(3, "a.wav", 250)?;
+        index.cache_touch(3, "b.wav", 50)?;
+        cache.pin_song(3, true)?;
+
+        // 45 > 30: 고정된 곡 3을 빼고 가장 오래된 곡 2를 통째로 지운다.
+        assert_eq!(cache.evict()?, 15);
+        assert_eq!(cache.total()?, 30);
+        assert!(!cache.contains(2, "a.wav", 10) && !cache.contains(2, "b.wav", 5));
+        assert!(cache.contains(1, "a.wav", 10) && cache.contains(1, "b.wav", 5));
+        // 그다음은 곡 1 전체. 고정된 곡 3은 남는다.
+        assert_eq!(cache.clear()?, 15);
+        assert!(!cache.contains(1, "a.wav", 10) && !cache.contains(1, "b.wav", 5));
+        assert!(cache.contains(3, "a.wav", 10) && cache.contains(3, "b.wav", 5));
+        assert_eq!(cache.total()?, 15);
         Ok(())
     }
 
