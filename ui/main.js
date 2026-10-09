@@ -110,6 +110,7 @@ function renderServer(s) {
     addRow(dl, "상태", `서버에 연결하지 못했습니다: ${s.error}`);
   }
   dl.hidden = !dl.children.length;
+  li.querySelector(".session-file").hidden = !s.session_in_file;
 
   const sync = li.querySelector(".sync");
   if (s.sync.last_error) {

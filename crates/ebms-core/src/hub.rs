@@ -55,6 +55,11 @@ impl Server {
         &self.client.api
     }
 
+    /// 키체인을 쓰지 못해 세션키가 평문 파일에 있는지. 설정 창에 경고로 보여준다.
+    pub fn session_in_file(&self) -> bool {
+        crate::session::session_file(&self.client.paths.root).is_file()
+    }
+
     pub fn sync_status(&self) -> SyncStatus {
         self.status
             .lock()

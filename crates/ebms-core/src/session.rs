@@ -1,13 +1,16 @@
 //! 서버별 세션키 저장.
 //!
 //! OS 키체인(Windows 자격 증명 관리자, macOS 키체인, Linux Secret Service)에 서버 주소별로 둔다.
-//! 키체인을 쓸 수 없으면 서버 데이터 폴더의 `session` 파일(권한 600)에 둔다.
+//! 키체인을 쓸 수 없으면 서버 데이터 폴더의 `session` 파일(권한 600)에 두고 `warn!`을 남긴다.
+//! 설정 창은 [`SessionStore::in_file`]로 이를 알린다.
+//! Windows는 파일 ACL을 따로 정하지 않는다. 기본 위치(`%APPDATA%\ebms`)는 사용자 프로필의 ACL을
+//! 물려받아 다른 일반 사용자는 읽지 못하지만, 데이터 폴더를 다른 곳으로 지정하면 그 폴더 권한을 따른다.
 //!
 //! 키체인 호출은 블로킹이므로 tokio 런타임 밖(또는 `spawn_blocking`)에서 부른다.
 
 use std::path::{Path, PathBuf};
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::Result;
 
@@ -25,7 +28,7 @@ impl SessionStore {
     pub fn new(url: &str, server_dir: &Path, use_keyring: bool) -> Self {
         Self {
             url: url.to_string(),
-            file: server_dir.join(SESSION_FILE),
+            file: session_file(server_dir),
             use_keyring,
         }
     }
@@ -65,10 +68,24 @@ impl SessionStore {
                     remove_file(&self.file)?;
                     return Ok(());
                 }
-                Err(e) => debug!(%e, "keyring write failed, using session file"),
+                Err(e) => warn!(
+                    %e,
+                    file = %self.file.display(),
+                    "keyring write failed, session key saved to a plain file"
+                ),
             }
+        } else if self.use_keyring {
+            warn!(
+                file = %self.file.display(),
+                "keyring unavailable, session key saved to a plain file"
+            );
         }
         write_private(&self.file, key)
+    }
+
+    /// 세션키가 키체인이 아니라 파일에 있는지. 설정 창 경고용.
+    pub fn in_file(&self) -> bool {
+        self.file.is_file()
     }
 
     pub fn clear(&self) -> Result<()> {
@@ -80,6 +97,11 @@ impl SessionStore {
         }
         remove_file(&self.file)
     }
+}
+
+/// 키체인을 못 쓸 때 세션키를 두는 파일.
+pub fn session_file(server_dir: &Path) -> PathBuf {
+    server_dir.join(SESSION_FILE)
 }
 
 fn remove_file(path: &Path) -> Result<()> {
@@ -122,7 +144,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new("http://127.0.0.1:8000", dir.path(), false);
         assert_eq!(store.load().unwrap(), None);
+        assert!(!store.in_file());
         store.save("secret").unwrap();
+        assert!(store.in_file());
         assert_eq!(store.load().unwrap().as_deref(), Some("secret"));
         #[cfg(unix)]
         {
@@ -134,6 +158,7 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         store.clear().unwrap();
+        assert!(!store.in_file());
         assert_eq!(store.load().unwrap(), None);
         store.clear().unwrap();
     }
