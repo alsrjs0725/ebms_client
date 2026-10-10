@@ -168,6 +168,24 @@ pub fn set_mount_point(state: State<'_, AppState>, path: String) -> CmdResult<Dr
     Ok(state.mount.info())
 }
 
+/// 파일 로그 폴더. 파일 로그를 못 열었으면 None.
+#[tauri::command]
+pub fn log_info(state: State<'_, AppState>) -> Option<String> {
+    state
+        .log_dir
+        .as_ref()
+        .map(|d| d.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub fn open_log_dir(state: State<'_, AppState>) -> CmdResult<()> {
+    let dir = state
+        .log_dir
+        .as_ref()
+        .ok_or("파일 로그를 쓰지 않고 있습니다")?;
+    open::that_detached(dir).map_err(err)
+}
+
 #[tauri::command]
 pub fn quit(app: AppHandle) {
     app.exit(0);

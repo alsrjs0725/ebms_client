@@ -4,12 +4,15 @@
 //! 켜질 때 서버 공지 중 확인하지 않은 것이 있으면 공지 창을 띄운다([`notices`]).
 //! 설정 창은 앱을 실행할 때 열리고, 닫으면 웹뷰를 해제한다. 이미 떠 있을 때 다시 실행해도 열린다.
 //! 자동 시작은 `--background`로 실행해 창 없이 뜬다(서버가 하나도 없으면 그래도 연다).
+//! 로그는 콘솔과 앱 데이터 폴더의 `logs/`에 함께 남긴다([`logging`]).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod logging;
 mod mount;
 mod notices;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,33 +26,31 @@ const SETTINGS: &str = "settings";
 
 pub struct AppState {
     pub hub: Arc<Hub>,
+    /// 파일 로그 폴더. 파일 로그를 못 열었으면 None
+    pub log_dir: Option<PathBuf>,
     pub mount: mount::Mount,
     pub notices: notices::Notices,
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,fuser=error".into()),
-        )
-        .init();
+    let root = match std::env::var_os("EBMS_DATA") {
+        Some(d) => Some(PathBuf::from(d)),
+        None => AppDir::default_root(),
+    };
+    let log_dir = logging::init(root.as_deref());
 
-    if let Err(e) = run() {
+    if let Err(e) = run(root, log_dir) {
         tracing::error!("{e}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     // 코어(다운로드, 가상 FS)와 Tauri가 같은 tokio 런타임을 쓴다.
     let rt = Box::leak(Box::new(tokio::runtime::Runtime::new()?));
     tauri::async_runtime::set(rt.handle().clone());
 
-    let root = match std::env::var_os("EBMS_DATA") {
-        Some(d) => d.into(),
-        None => AppDir::default_root().ok_or("no app data folder, set EBMS_DATA")?,
-    };
+    let root = root.ok_or("no app data folder, set EBMS_DATA")?;
     let use_keyring = std::env::var_os("EBMS_NO_KEYRING").is_none();
     let hub = Arc::new(Hub::open(
         AppDir::new(root),
@@ -68,6 +69,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mount: mount::Mount::default(),
             notices: notices::Notices::new(&hub),
             hub: hub.clone(),
+            log_dir,
         })
         .invoke_handler(tauri::generate_handler![
             commands::list_servers,
@@ -80,6 +82,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             commands::sync_now,
             commands::drive_info,
             commands::set_mount_point,
+            commands::log_info,
+            commands::open_log_dir,
             commands::quit,
             notices::pending_notices,
             notices::ack_notices,
