@@ -78,6 +78,8 @@ pub struct ChartRow {
     pub size: u64,
     pub crc32: u32,
     pub chunk_id: u32,
+    /// 이 행이 가리키는 청크 파일의 해시. 오프셋은 이 판의 파일 기준이다.
+    pub chunk_sha256: String,
     pub data_offset: u64,
 }
 
@@ -89,6 +91,8 @@ pub struct PreRow {
     pub size: u64,
     pub crc32: u32,
     pub chunk_id: u32,
+    /// 이 행이 가리키는 청크 파일의 해시. 오프셋은 이 판의 파일 기준이다.
+    pub chunk_sha256: String,
     pub data_offset: u64,
 }
 
@@ -221,8 +225,11 @@ impl Index {
     /// 곡의 로컬 사전 파일.
     pub fn pre_files(&self, song_id: u32) -> Result<Vec<PreRow>> {
         let con = self.con();
+        // 행과 청크 해시를 한 문장으로 읽어 오프셋과 파일 판이 어긋나지 않게 한다.
         let mut stmt = con.prepare_cached(
-            "SELECT path, size, crc32, chunk_id, data_offset FROM pre_file WHERE song_id = ?1",
+            "SELECT f.path, f.size, f.crc32, f.chunk_id, f.data_offset, c.sha256
+             FROM pre_file f JOIN chunk c ON c.kind = 'pre' AND c.id = f.chunk_id
+             WHERE f.song_id = ?1",
         )?;
         let rows = stmt.query_map([song_id], |r| {
             Ok(PreRow {
@@ -232,6 +239,7 @@ impl Index {
                 crc32: r.get(2)?,
                 chunk_id: r.get(3)?,
                 data_offset: r.get::<_, i64>(4)? as u64,
+                chunk_sha256: r.get(5)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -301,8 +309,7 @@ impl Index {
 
     pub fn charts(&self) -> Result<HashMap<String, ChartRow>> {
         let con = self.con();
-        let mut stmt =
-            con.prepare("SELECT sha256, ext, size, crc32, chunk_id, data_offset FROM chart")?;
+        let mut stmt = con.prepare(&format!("{CHART_SELECT} FROM {CHART_FROM}"))?;
         let rows = stmt.query_map([], chart_row)?;
         let mut out = HashMap::new();
         for row in rows {
@@ -315,9 +322,9 @@ impl Index {
     /// sha256으로 차트를 찾는다. 없는 것은 빠진다.
     pub fn charts_by_sha(&self, sha256: &[String]) -> Result<Vec<ChartRow>> {
         let con = self.con();
-        let mut stmt = con.prepare_cached(
-            "SELECT sha256, ext, size, crc32, chunk_id, data_offset FROM chart WHERE sha256 = ?1",
-        )?;
+        let mut stmt = con.prepare_cached(&format!(
+            "{CHART_SELECT} FROM {CHART_FROM} WHERE h.sha256 = ?1"
+        ))?;
         let mut out = Vec::new();
         for sha in sha256 {
             if let Some(row) = stmt.query_row([sha], chart_row).optional()? {
@@ -455,6 +462,11 @@ impl Index {
     }
 }
 
+/// 차트 행과 청크 해시를 한 문장으로 읽어 오프셋과 파일 판이 어긋나지 않게 한다.
+const CHART_SELECT: &str =
+    "SELECT h.sha256, h.ext, h.size, h.crc32, h.chunk_id, h.data_offset, c.sha256";
+const CHART_FROM: &str = "chart h JOIN chunk c ON c.kind = 'chart' AND c.id = h.chunk_id";
+
 fn chart_row(r: &rusqlite::Row) -> rusqlite::Result<ChartRow> {
     Ok(ChartRow {
         sha256: r.get(0)?,
@@ -463,5 +475,6 @@ fn chart_row(r: &rusqlite::Row) -> rusqlite::Result<ChartRow> {
         crc32: r.get(3)?,
         chunk_id: r.get(4)?,
         data_offset: r.get::<_, i64>(5)? as u64,
+        chunk_sha256: r.get(6)?,
     })
 }
