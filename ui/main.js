@@ -240,9 +240,20 @@ $("drive-form").addEventListener("submit", (ev) => {
   });
 });
 
+async function showLogPath() {
+  const dir = await invoke("log_info");
+  $("log-path").textContent = dir
+    ? `오류와 다운로드 기록은 이 폴더에 날짜별로 남습니다(최근 7일): ${dir}`
+    : "파일 로그를 열지 못해 기록을 남기지 않고 있습니다.";
+  $("open-logs").hidden = !dir;
+}
+
+$("open-logs").addEventListener("click", () => run($("open-logs"), () => invoke("open_log_dir")));
+
 confirmClick($("quit"), "한 번 더 누르면 종료 (가상 드라이브도 내려감)", () => invoke("quit"));
 
 refresh().catch((e) => showMessage(String(e)));
+showLogPath().catch(() => {});
 setInterval(() => {
   if (loggingIn.size === 0) refresh().catch(() => {});
 }, REFRESH_MS);
