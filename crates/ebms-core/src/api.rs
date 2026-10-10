@@ -27,6 +27,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// 플레이 다운로드가 중간에 끊겼을 때 이어받기를 시도할 횟수.
 const MAX_RESUME: u32 = 3;
 
+/// 서버가 파일을 스토리지(S3 등)에 올리는 중이라며 503 + Retry-After를 줄 때 기다리는 총 시간 상한(초).
+const MAX_PREPARING_WAIT: u64 = 10 * 60;
+
+/// 503 한 번에 기다리는 시간 상한(초).
+const MAX_PREPARING_RETRY_AFTER: u64 = 30;
+
 /// 사전 파일 하나를 받는 전체 시간 상한. 감속 중에도 프리뷰 몇 MB는 받을 수 있게 넉넉히.
 const PRE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -193,8 +199,35 @@ impl Api {
     }
 
     async fn get(&self, path: &str) -> Result<reqwest::Response> {
-        let resp = self.request(Method::GET, self.url(path)).send().await?;
+        let url = self.url(path);
+        let resp = self.send_ready(|| self.request(Method::GET, &url)).await?;
         self.check(resp, StatusCode::OK)
+    }
+
+    /// 요청을 보낸다. 서버가 파일을 스토리지에 올리는 중(503 + Retry-After)이면 기다렸다 다시 보낸다.
+    /// 스토리지를 쓰는 서버는 302로 presigned URL을 주고, reqwest가 따라간다(다른 호스트로 갈 때 Authorization은 빠짐).
+    async fn send_ready(
+        &self,
+        make: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        let mut waited = 0;
+        loop {
+            let resp = make().send().await?;
+            if resp.status() != StatusCode::SERVICE_UNAVAILABLE || waited >= MAX_PREPARING_WAIT {
+                return Ok(resp);
+            }
+            let Some(secs) = resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<u64>().ok())
+            else {
+                return Ok(resp);
+            };
+            let secs = secs.clamp(1, MAX_PREPARING_RETRY_AFTER);
+            waited += secs;
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+        }
     }
 
     fn check(&self, resp: reqwest::Response, expected: StatusCode) -> Result<reqwest::Response> {
@@ -399,15 +432,16 @@ impl Api {
             warn!(song_id, written, attempt, %err, "play download interrupted, resuming");
             tokio::time::sleep(Duration::from_millis(250 << attempt)).await;
             let r = match self
-                .request(Method::GET, &url)
-                .header(header::RANGE, format!("bytes={written}-"))
-                .header(header::IF_RANGE, etag.clone())
-                .send()
+                .send_ready(|| {
+                    self.request(Method::GET, &url)
+                        .header(header::RANGE, format!("bytes={written}-"))
+                        .header(header::IF_RANGE, etag.clone())
+                })
                 .await
             {
                 Ok(r) => r,
                 Err(e) => {
-                    next = Err(e.into());
+                    next = Err(e);
                     continue;
                 }
             };

@@ -53,6 +53,12 @@ struct Server {
     play_cuts: usize,
     /// 켜 두면 청크 본문을 해시 목록과 다르게 망가뜨려 보낸다.
     corrupt_chart: bool,
+    /// 켜 두면 플레이 다운로드를 다른 포트의 `/bucket/song/{id}`로 302 리다이렉트한다. S3 캐시를 쓰는 서버 흉내.
+    bucket: bool,
+    /// 버킷 주소(다른 출처). spawn_server가 채운다.
+    bucket_url: String,
+    /// 남은 횟수만큼 리다이렉트 대신 503 + Retry-After를 보낸다. 버킷에 올리는 중인 서버 흉내.
+    bucket_preparing: usize,
 }
 
 #[derive(Default)]
@@ -66,6 +72,11 @@ struct Counters {
     pre_chunk: AtomicUsize,
     pre_hash: AtomicUsize,
     manifest: AtomicUsize,
+    /// 503(올리는 중)으로 돌려보낸 플레이 다운로드 요청
+    play_preparing: AtomicUsize,
+    /// 버킷에서 받은 요청(이어받기 포함)
+    bucket_get: AtomicUsize,
+    bucket_resume: AtomicUsize,
 }
 
 /// 켜 두면 사전 파일 응답을 `release`까지 붙잡는다. 멈춘 다운로드 흉내.
@@ -293,6 +304,9 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                     return status.into_response();
                 }
                 let mut server = s.server();
+                if server.bucket {
+                    return bucket_redirect(&s, &mut server, id, &headers);
+                }
                 let song = server.songs[&id].clone();
                 let etag = format!("\"{}\"", sha(&song));
                 // grant 안의 이어받기는 티켓을 쓰지 않는다(If-Range가 맞을 때만).
@@ -335,13 +349,81 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                 ([(header::ETAG, etag)], body).into_response()
             }),
         )
-        .with_state(state);
-    let listener = rt
-        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
-        .unwrap();
+        // S3 버킷 흉내. presigned URL처럼 Authorization 없이 받고, Range를 지원한다.
+        .route(
+            "/bucket/song/{id}",
+            get(|State(s): State<AppState>, Path(id): Path<u32>, headers: HeaderMap| async move {
+                if headers.contains_key(header::AUTHORIZATION) {
+                    // R2는 presigned URL에 Authorization 헤더가 같이 오면 거절한다.
+                    return StatusCode::BAD_REQUEST.into_response();
+                }
+                s.counters.bucket_get.fetch_add(1, Ordering::SeqCst);
+                let mut server = s.server();
+                let song = server.songs[&id].clone();
+                // 버킷의 ETag는 sha256이 아니다.
+                let etag = format!("\"bucket-{}\"", &sha(&song)[..16]);
+                let start = headers
+                    .get(header::RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("bytes="))
+                    .and_then(|v| v.strip_suffix('-'))
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|_| {
+                        headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok())
+                            == Some(etag.as_str())
+                    });
+                if let Some(start) = start {
+                    s.counters.bucket_resume.fetch_add(1, Ordering::SeqCst);
+                    let body = play_body(&mut server, song[start..].to_vec());
+                    let range = format!("bytes {start}-{}/{}", song.len() - 1, song.len());
+                    return (
+                        StatusCode::PARTIAL_CONTENT,
+                        [(header::ETAG, etag), (header::CONTENT_RANGE, range)],
+                        body,
+                    )
+                        .into_response();
+                }
+                let body = play_body(&mut server, song);
+                ([(header::ETAG, etag)], body).into_response()
+            }),
+        )
+        .with_state(state.clone());
+    let bind = || {
+        rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap()
+    };
+    let (listener, bucket) = (bind(), bind());
     let addr = listener.local_addr().unwrap();
+    state.server().bucket_url = format!("http://{}", bucket.local_addr().unwrap());
+    let bucket_app = app.clone();
     rt.spawn(async move { axum::serve(listener, app).await.unwrap() });
+    rt.spawn(async move { axum::serve(bucket, bucket_app).await.unwrap() });
     format!("http://{addr}")
+}
+
+/// S3 캐시를 쓰는 서버처럼 티켓을 쓰고 버킷으로 302 리다이렉트한다.
+/// 이어받기(Range)는 서버의 grant처럼 티켓을 더 쓰지 않는다.
+fn bucket_redirect(
+    s: &AppState,
+    server: &mut Server,
+    id: u32,
+    headers: &HeaderMap,
+) -> axum::response::Response {
+    if server.bucket_preparing > 0 {
+        server.bucket_preparing -= 1;
+        s.counters.play_preparing.fetch_add(1, Ordering::SeqCst);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            axum::Json(json!({"detail": "preparing download"})),
+        )
+            .into_response();
+    }
+    if !headers.contains_key(header::RANGE) {
+        s.counters.play.fetch_add(1, Ordering::SeqCst);
+        server.tickets -= 1;
+    }
+    Redirect::to(&format!("{}/bucket/song/{id}", server.bucket_url)).into_response()
 }
 
 struct Fixture {
@@ -1019,6 +1101,30 @@ fn interrupted_play_download_resumes_without_another_ticket() {
         read_all(&fs, &format!("{SONG}/bga/movie.mp4")).unwrap(),
         env.want("bga/movie.mp4")
     );
+}
+
+#[test]
+fn play_download_follows_bucket_redirect_and_resumes_there() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    {
+        let mut server = env.state.server();
+        server.bucket = true;
+        server.bucket_preparing = 1;
+        server.play_cuts = 1;
+    }
+
+    assert_eq!(
+        read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap(),
+        env.want("bgm01.wav")
+    );
+    let c = &env.state.counters;
+    assert_eq!(c.play_preparing.load(Ordering::SeqCst), 1);
+    assert_eq!(c.play.load(Ordering::SeqCst), 1);
+    assert_eq!(c.bucket_get.load(Ordering::SeqCst), 2);
+    assert_eq!(c.bucket_resume.load(Ordering::SeqCst), 1);
+    assert_eq!(env.state.server().tickets, 4);
 }
 
 #[test]
