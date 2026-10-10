@@ -138,7 +138,11 @@ impl WinFs {
             };
             info.reset();
             // 이름은 트리에서 이미 255자 안으로 줄였다. 그래도 넘치면 그 항목만 뺀다.
-            if info.set_name(&name).is_err() {
+            // `set_name`은 끝의 NUL까지 이름 길이에 넣는다. 그러면 이어 읽기 marker("a.wav")보다
+            // 버퍼 속 이름("a.wav\0")이 커서 앞 페이지의 마지막 항목을 다시 주고, 한 응답에 다
+            // 담기지 않는 큰 폴더는 나열이 끝나지 않는다.
+            let wide: Vec<u16> = name.encode_utf16().collect();
+            if info.set_name_raw(wide.as_slice()).is_err() {
                 continue;
             }
             self.fill(info.file_info_mut(), attr);
