@@ -4,18 +4,20 @@
 //!   사전 청크에 아직 없는 곡(서버가 만드는 중, 이전 서버)만 사전 API로 그 파일을 받는다.
 //! - 플레이 파일(키음·BGA 등)을 처음 열면 플레이 API로 곡 zip 전체를 받는다(티켓 1개).
 //!   구동기가 아닌 프로그램의 읽기는 받지 않고 거절한다.
-//! - 티켓이 없어 `429`를 받으면 `Retry-After` 동안 그 곡의 플레이 다운로드를 다시 요청하지 않는다.
+//! - 티켓이 없어 `429`를 받으면 `Retry-After` 동안 이 서버의 어느 곡도 플레이 다운로드를 다시
+//!   요청하지 않는다. 티켓은 계정 단위라 다른 곡을 요청해도 같은 `429`가 온다.
+//!   대기 시각은 데이터 폴더에 적어 두어 재시작해도 이어진다.
 //! - 같은 파일·곡을 동시에 요청하면 한 번만 받는다.
 
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{info, warn};
 
-use crate::api::Api;
+use crate::api::{Api, MAX_RETRY_AFTER};
 use crate::cache::Cache;
 use crate::fs::Caller;
 use crate::manifest::{FileEntry, FileKind};
@@ -34,18 +36,23 @@ pub struct Fetcher {
     cache: Arc<Cache>,
     paths: Paths,
     locks: Mutex<HashMap<Key, Arc<tokio::sync::Mutex<()>>>>,
-    /// 티켓이 없어 플레이 다운로드를 멈춘 곡과 다시 시도할 시각
-    retry_at: Mutex<HashMap<u32, Instant>>,
+    /// 티켓이 없어 플레이 다운로드를 멈춘 경우 다시 시도할 시각(unix 초). 서버(계정) 단위.
+    retry_at: Mutex<Option<u64>>,
 }
 
 impl Fetcher {
     pub fn new(api: Arc<Api>, cache: Arc<Cache>, paths: Paths) -> Self {
+        // 지난 실행에서 받은 429 대기를 이어간다. 읽지 못하면 대기 없음으로 본다.
+        let retry_at = std::fs::read_to_string(paths.no_ticket())
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|&at| at > unix_now());
         Self {
             api,
             cache,
             paths,
             locks: Mutex::new(HashMap::new()),
-            retry_at: Mutex::new(HashMap::new()),
+            retry_at: Mutex::new(retry_at),
         }
     }
 
@@ -104,7 +111,7 @@ impl Fetcher {
 
     /// 곡 zip 전체를 받아 모든 파일을 캐시에 넣는다. `program`은 로그용 요청 프로그램.
     pub async fn ensure_song(&self, song: &SongInfo, program: &str) -> Result<()> {
-        self.check_backoff(song.song_id)?;
+        self.check_backoff()?;
         let lock = self.lock(Key::Song(song.song_id));
         let _guard = lock.lock().await;
         if song
@@ -115,7 +122,7 @@ impl Fetcher {
             return Ok(());
         }
         // 잠금을 기다리는 동안 앞선 요청이 429를 받았을 수 있다.
-        self.check_backoff(song.song_id)?;
+        self.check_backoff()?;
 
         info!(
             song_id = song.song_id,
@@ -145,35 +152,44 @@ impl Fetcher {
             // 알림 없이 로그에만 남긴다.
             warn!(
                 song_id = song.song_id,
-                retry_after, "no download ticket, pausing this song"
+                retry_after, "no download ticket, pausing play downloads from this server"
             );
-            self.retry_at
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(
-                    song.song_id,
-                    Instant::now() + Duration::from_secs(*retry_after),
-                );
+            self.pause(*retry_after);
         }
         result?;
         self.evict_in_background();
         Ok(())
     }
 
-    /// 티켓을 기다리는 곡이면 서버에 묻지 않고 바로 `NoTicket`을 돌려준다.
-    fn check_backoff(&self, song_id: u32) -> Result<()> {
-        let mut map = self.retry_at.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(&at) = map.get(&song_id) else {
+    /// 티켓을 기다리는 중이면 서버에 묻지 않고 바로 `NoTicket`을 돌려준다.
+    fn check_backoff(&self) -> Result<()> {
+        let mut retry_at = self.retry_at.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(mut at) = *retry_at else {
             return Ok(());
         };
-        let now = Instant::now();
+        let now = unix_now();
         if at <= now {
-            map.remove(&song_id);
+            *retry_at = None;
+            let _ = std::fs::remove_file(self.paths.no_ticket());
             return Ok(());
         }
+        // 시계가 뒤로 가거나 파일이 바뀌어도 상한보다 오래 기다리지 않는다.
+        if at - now > MAX_RETRY_AFTER {
+            at = now + MAX_RETRY_AFTER;
+            *retry_at = Some(at);
+        }
         Err(Error::NoTicket {
-            retry_after: (at - now).as_secs().max(1),
+            retry_after: at - now,
         })
+    }
+
+    /// `retry_after`초 동안 이 서버의 플레이 다운로드를 멈추고 데이터 폴더에 적어 둔다.
+    fn pause(&self, retry_after: u64) {
+        let at = unix_now().saturating_add(retry_after.clamp(1, MAX_RETRY_AFTER));
+        *self.retry_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(at);
+        if let Err(e) = std::fs::write(self.paths.no_ticket(), at.to_string()) {
+            warn!(%e, "failed to save no-ticket backoff");
+        }
     }
 
     fn lock(&self, key: Key) -> Arc<tokio::sync::Mutex<()>> {
@@ -193,6 +209,12 @@ impl Fetcher {
             }
         });
     }
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// 사전 API로 받은 파일이 매니페스트와 같은지 확인한다.

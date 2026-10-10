@@ -45,6 +45,8 @@ struct Server {
     /// 1회용 코드 → code_challenge
     codes: HashMap<String, String>,
     tickets: u32,
+    /// 티켓이 없을 때 보낼 Retry-After. 비어 있으면 "30".
+    retry_after: String,
     /// 남은 횟수만큼 청크 다운로드 직전에 그 청크에 차트를 덧붙인다. 곡 추가 중인 서버 흉내.
     appends_on_download: usize,
     /// 켜 두면 청크 본문을 해시 목록과 다르게 망가뜨려 보낸다.
@@ -267,9 +269,13 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                 s.counters.play.fetch_add(1, Ordering::SeqCst);
                 let mut server = s.server();
                 if server.tickets == 0 {
+                    let retry_after = match server.retry_after.as_str() {
+                        "" => "30".to_string(),
+                        v => v.to_string(),
+                    };
                     return (
                         StatusCode::TOO_MANY_REQUESTS,
-                        [(header::RETRY_AFTER, "30")],
+                        [(header::RETRY_AFTER, retry_after)],
                         axum::Json(json!({"detail": "no download ticket"})),
                     )
                         .into_response();
@@ -797,6 +803,77 @@ fn no_ticket_pauses_the_song_until_retry_after() {
         read_all(&fs, &format!("{SONG}/banner.png")).unwrap(),
         env.want("banner.png")
     );
+}
+
+/// 서버에 없는 곡. 대기 중이면 서버에 묻기 전에 거절되는지만 본다.
+fn other_song() -> ebms_core::tree::SongInfo {
+    let entry = FileEntry {
+        path: "other.wav".into(),
+        size: 10,
+        offset: 0,
+        comp_size: 10,
+        crc32: "00000000".into(),
+        method: 0,
+        kind: FileKind::Play,
+    };
+    ebms_core::tree::SongInfo {
+        song_id: 2,
+        zip_size: 100,
+        zip_sha256: "0".repeat(64),
+        files: vec![Arc::new(entry)],
+    }
+}
+
+#[test]
+fn no_ticket_pauses_every_song_of_the_server_across_restart() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    env.state.server().tickets = 0;
+
+    let err = read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap_err();
+    assert!(matches!(err, Error::NoTicket { retry_after: 30 }), "{err}");
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+
+    // 티켓은 계정 단위라 다른 곡도 서버에 묻지 않는다.
+    let err = env
+        .rt
+        .block_on(env.client.fetcher.ensure_song(&other_song(), "test"))
+        .unwrap_err();
+    assert!(matches!(err, Error::NoTicket { .. }), "{err}");
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+
+    // 다시 시작해도 대기가 이어진다.
+    let mut opts = Options::new(&env.url, env._dir.path());
+    opts.session = Some(KEY.to_string());
+    let client = Client::open(&opts).unwrap();
+    let fs = client.fs(env.rt.handle().clone()).unwrap();
+    let err = read_all(&fs, &format!("{SONG}/bgm02.wav")).unwrap_err();
+    assert!(matches!(err, Error::NoTicket { .. }), "{err}");
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn huge_retry_after_is_clamped_not_a_panic() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    {
+        let mut server = env.state.server();
+        server.tickets = 0;
+        server.retry_after = u64::MAX.to_string();
+    }
+    let err = read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap_err();
+    assert!(
+        matches!(err, Error::NoTicket { retry_after: 3600 }),
+        "{err}"
+    );
+    let err = read_all(&fs, &format!("{SONG}/bgm02.wav")).unwrap_err();
+    assert!(
+        matches!(err, Error::NoTicket { retry_after } if retry_after <= 3600),
+        "{err}"
+    );
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
 }
 
 #[test]
