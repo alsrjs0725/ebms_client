@@ -18,6 +18,9 @@ use crate::{Error, Result};
 /// 서버가 Retry-After를 주지 않았을 때 기다릴 시간(초).
 const DEFAULT_RETRY_AFTER: u64 = 60;
 
+/// Retry-After 상한(초). 서버 버그나 악의적인 값으로 오래 멈추거나 시각 계산이 넘치지 않게 자른다.
+pub const MAX_RETRY_AFTER: u64 = 60 * 60;
+
 /// 응답 바이트가 이만큼 오지 않으면 연결이 멈춘 것으로 본다.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -207,7 +210,8 @@ impl Api {
                     .get(header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.trim().parse().ok())
-                    .unwrap_or(DEFAULT_RETRY_AFTER);
+                    .unwrap_or(DEFAULT_RETRY_AFTER)
+                    .min(MAX_RETRY_AFTER);
                 Err(Error::NoTicket { retry_after })
             }
             s => Err(Error::Status {
