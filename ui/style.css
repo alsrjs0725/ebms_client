@@ -62,6 +62,7 @@ section > p.muted { margin: 6px 0; }
 .account dt { color: var(--muted); }
 .account dd { margin: 0; overflow-wrap: anywhere; }
 .sync { margin: 6px 0 0; font-size: 12px; }
+.warning { margin: 6px 0 0; font-size: 12px; color: var(--warn); }
 
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 

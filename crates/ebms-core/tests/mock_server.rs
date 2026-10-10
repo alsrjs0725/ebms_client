@@ -821,6 +821,74 @@ fn changed_song_on_server_is_an_error_not_wrong_bytes() {
     ));
 }
 
+/// 서버에서 곡 1을 같은 경로·크기, 다른 내용의 곡으로 바꾼다(DB 초기화 후 id 재사용 흉내).
+fn replace_song_on_server(env: &Env) -> Vec<(&'static str, Vec<u8>)> {
+    let mut files = env.fixture.files.clone();
+    for (_, data) in files.iter_mut().skip(1) {
+        data.iter_mut().for_each(|b| *b = b.wrapping_add(1));
+    }
+    let zip = song_zip(&files);
+    let mut server = env.state.server();
+    let mut manifest: Vec<SongManifest> = serde_json::from_slice(&server.manifests[&0]).unwrap();
+    manifest[0].zip_size = zip.len() as u64;
+    manifest[0].zip_sha256 = sha(&zip);
+    manifest[0].files = entries(&zip);
+    server
+        .manifests
+        .insert(0, serde_json::to_vec(&manifest).unwrap());
+    server.songs.insert(1, zip);
+    files
+}
+
+#[test]
+fn reused_song_id_does_not_serve_old_cached_files() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    let path = format!("{SONG}/bgm01.wav");
+    assert_eq!(read_all(&fs, &path).unwrap(), env.want("bgm01.wav"));
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+
+    let files = replace_song_on_server(&env);
+    env.rt.block_on(env.client.sync()).unwrap();
+    // 동기화 때 옛 곡의 캐시를 지운다.
+    assert_eq!(env.client.fetcher.cache().total().unwrap(), 0);
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    assert_eq!(read_all(&fs, &path).unwrap(), files[1].1);
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn removed_song_cache_is_dropped_on_sync() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap();
+    let cache = env.client.fetcher.cache();
+    let cached = cache.path(1, "bgm01.wav").unwrap();
+    assert!(cached.exists());
+
+    env.state.server().manifests.clear();
+    env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(cache.total().unwrap(), 0);
+    assert!(!cached.exists());
+}
+
+#[test]
+fn truncated_cache_file_is_downloaded_again() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    let path = format!("{SONG}/bgm01.wav");
+    read_all(&fs, &path).unwrap();
+
+    // 정전으로 잘린 파일 흉내
+    let cached = env.client.fetcher.cache().path(1, "bgm01.wav").unwrap();
+    std::fs::write(&cached, b"").unwrap();
+    assert_eq!(read_all(&fs, &path).unwrap(), env.want("bgm01.wav"));
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 2);
+}
+
 /// 브라우저 대신 로그인 주소를 열어 루프백 리다이렉트까지 따라간다.
 fn fake_browser(url: &str) {
     let url = url.to_string();

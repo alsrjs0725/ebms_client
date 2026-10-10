@@ -13,7 +13,7 @@ use tracing::warn;
 
 use crate::api::{Api, Me, User};
 use crate::auth::LoginRequest;
-use crate::config::{AppDir, Config, ServerEntry, normalize_url};
+use crate::config::{AppDir, Config, ServerEntry, is_insecure_url, normalize_url};
 use crate::drive::Drive;
 use crate::fs::EbmsFs;
 use crate::session::SessionStore;
@@ -53,6 +53,11 @@ pub struct SyncStatus {
 impl Server {
     pub fn api(&self) -> &Api {
         &self.client.api
+    }
+
+    /// 키체인을 쓰지 못해 세션키가 평문 파일에 있는지. 설정 창에 경고로 보여준다.
+    pub fn session_in_file(&self) -> bool {
+        crate::session::session_file(&self.client.paths.root).is_file()
     }
 
     pub fn sync_status(&self) -> SyncStatus {
@@ -215,6 +220,9 @@ impl Hub {
     /// `/api/version`으로 EBMS 서버인지 확인하고 추가한다.
     pub async fn add(&self, url: &str, name: Option<&str>) -> Result<Arc<Server>> {
         let url = normalize_url(url)?;
+        if is_insecure_url(&url) {
+            warn!(%url, "adding an unencrypted http server, session key will be sent in plain text");
+        }
         let version = Api::new(&url)?
             .version()
             .await
@@ -324,6 +332,9 @@ fn open_server(
     entry: &ServerEntry,
 ) -> Result<Arc<Server>> {
     dir.prepare_server_dir(entry)?;
+    if entry.is_insecure() {
+        warn!(server = %entry.name, url = %entry.url, "unencrypted http server, session key is sent in plain text");
+    }
     let mut opts = Options::new(&entry.url, dir.server_dir(entry));
     opts.session = SessionStore::new(&entry.url, &dir.server_dir(entry), use_keyring).load()?;
     let client = Client::open(&opts)?;

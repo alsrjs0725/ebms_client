@@ -49,13 +49,27 @@ pub struct Notice {
 }
 
 /// `POST /api/auth/client/token` 응답.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct Token {
     pub session_key: String,
     /// unix 초
     pub expires_at: i64,
     pub user: User,
 }
+
+/// 로그에 세션키가 새지 않게 가린다.
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Token")
+            .field("session_key", &REDACTED)
+            .field("expires_at", &self.expires_at)
+            .field("user", &self.user)
+            .finish()
+    }
+}
+
+/// `Debug`에서 세션키 대신 보여준다.
+pub(crate) const REDACTED: &str = "<redacted>";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct User {
@@ -104,13 +118,23 @@ pub struct PreUsage {
 }
 
 /// 서버 HTTP API 클라이언트. 세션키가 있으면 모든 요청에 `Authorization: Bearer`로 싣는다.
-#[derive(Debug)]
 pub struct Api {
     base: String,
     http: reqwest::Client,
     session: RwLock<Option<String>>,
     /// 401을 받았음. 다시 로그인할 때까지 켜져 있다.
     unauthorized: AtomicBool,
+}
+
+/// 세션키는 가리고 있는지만 보여준다.
+impl std::fmt::Debug for Api {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Api")
+            .field("base", &self.base)
+            .field("session", &self.has_session().then_some(REDACTED))
+            .field("unauthorized", &self.unauthorized.load(Ordering::SeqCst))
+            .finish_non_exhaustive()
+    }
 }
 
 impl Api {

@@ -12,6 +12,7 @@ const LOGIN_LABELS = {
   logged_out: "로그아웃 상태",
 };
 const REFRESH_MS = 30_000;
+const INSECURE_TEXT = "암호화되지 않은 http 주소입니다. 세션키가 평문으로 전송됩니다.";
 
 /** 진행 중인 로그인 (서버 id) */
 const loggingIn = new Set();
@@ -84,6 +85,7 @@ function renderServer(s) {
   const li = $("server-template").content.firstElementChild.cloneNode(true);
   li.querySelector(".name").textContent = s.name;
   li.querySelector(".url").textContent = s.url;
+  li.querySelector(".insecure").hidden = !s.insecure;
 
   const badge = li.querySelector(".badge");
   badge.textContent = loggingIn.has(s.id) ? "브라우저에서 로그인 중…" : LOGIN_LABELS[s.login];
@@ -110,6 +112,7 @@ function renderServer(s) {
     addRow(dl, "상태", `서버에 연결하지 못했습니다: ${s.error}`);
   }
   dl.hidden = !dl.children.length;
+  li.querySelector(".session-file").hidden = !s.session_in_file;
 
   const sync = li.querySelector(".sync");
   if (s.sync.last_error) {
@@ -219,7 +222,11 @@ $("add-form").addEventListener("submit", (ev) => {
     const s = await invoke("add_server", { url, name });
     $("add-url").value = "";
     $("add-name").value = "";
-    showMessage(`${s.name} 서버를 추가했습니다. 로그인해 주세요.`, "info");
+    if (s.insecure) {
+      showMessage(`${s.name} 서버를 추가했습니다. ${INSECURE_TEXT}`);
+    } else {
+      showMessage(`${s.name} 서버를 추가했습니다. 로그인해 주세요.`, "info");
+    }
     await refresh();
   });
 });
