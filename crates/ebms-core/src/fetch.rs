@@ -132,7 +132,7 @@ impl Fetcher {
         );
         let tmp = self.paths.tmp_file(&format!("song_{}", song.song_id));
         let result = async {
-            let sha = self.api.play_song(song.song_id, &tmp).await?;
+            let sha = self.api.play_song(song.song_id, tmp.path()).await?;
             if sha != song.zip_sha256 {
                 return Err(Error::Integrity(format!(
                     "song {}: expected {}, got {sha}",
@@ -141,13 +141,14 @@ impl Fetcher {
             }
             let cache = self.cache.clone();
             let song = song.clone();
-            let tmp = tmp.clone();
+            let tmp = tmp.path().to_path_buf();
             tokio::task::spawn_blocking(move || extract_song(&cache, &song, &tmp))
                 .await
                 .map_err(|e| Error::Other(e.to_string()))?
         }
         .await;
-        let _ = std::fs::remove_file(&tmp);
+        // 풀어 넣었으면 곡 zip은 필요 없다. 실패해도 지운다.
+        drop(tmp);
         if let Err(Error::NoTicket { retry_after }) = &result {
             // 알림 없이 로그에만 남긴다.
             warn!(

@@ -3,6 +3,7 @@
 //! 차트 청크, 매니페스트, 사전 청크(곡들의 배너·스테이지파일·프리뷰 등)를 받는다.
 //! 나머지(키음·BGA)는 플레이할 때 곡 zip 전체로 받는다([`crate::fetch`]).
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use tracing::{info, warn};
@@ -64,12 +65,12 @@ async fn sync_charts(
     let local = index.chunk_hashes(ChunkKind::Chart)?;
 
     for (&id, sha) in &remote {
-        let dest = paths.chart_chunk(id);
-        if local.get(&id) == Some(sha) && dest.exists() {
+        if local.get(&id) == Some(sha) && paths.chart_chunk(id, sha).exists() {
             continue;
         }
         let tmp = paths.tmp_file(&format!("chart_chunk_{id:05}"));
-        let Some(sha) = download_stable_chunk(api, Remote::Chart, id, sha.clone(), &tmp).await?
+        let Some(sha) =
+            download_stable_chunk(api, Remote::Chart, id, sha.clone(), tmp.path()).await?
         else {
             warn!(
                 chunk_id = id,
@@ -78,24 +79,27 @@ async fn sync_charts(
             report.chart_chunks_skipped.push(id);
             continue;
         };
+        let dest = paths.chart_chunk(id, &sha);
         if local.get(&id) == Some(&sha) && dest.exists() {
-            let _ = std::fs::remove_file(&tmp);
             continue;
         }
         let charts = {
-            let tmp = tmp.clone();
-            tokio::task::spawn_blocking(move || scan_chart_chunk(&tmp, id))
+            let tmp = tmp.path().to_path_buf();
+            let sha = sha.clone();
+            tokio::task::spawn_blocking(move || scan_chart_chunk(&tmp, id, &sha))
                 .await
                 .map_err(|e| Error::Other(e.to_string()))??
         };
-        std::fs::rename(&tmp, &dest)?;
+        // 새 판은 해시가 든 다른 이름으로 둔다. 옛 트리는 옛 파일을, 새 인덱스는 새 파일을 읽고
+        // 옛 파일은 트리를 다시 만든 뒤 다음 정리([`tidy_chunks`])에서 지운다.
+        tmp.persist(&dest)?;
         index.replace_chart_chunk(id, &sha, &charts)?;
         report.chart_chunks_updated.push(id);
     }
 
+    // 파일은 다음 정리에서 지운다. 지금 트리가 아직 읽을 수 있다.
     for &id in local.keys().filter(|id| !remote.contains_key(id)) {
         index.remove_chart_chunk(id)?;
-        let _ = std::fs::remove_file(paths.chart_chunk(id));
         report.chart_chunks_removed.push(id);
     }
     Ok(())
@@ -106,37 +110,83 @@ async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncRepo
     let local = index.chunk_hashes(ChunkKind::Pre)?;
 
     for (&id, sha) in &remote {
-        let dest = paths.pre_chunk(id);
-        if local.get(&id) == Some(sha) && dest.exists() {
+        if local.get(&id) == Some(sha) && paths.pre_chunk(id, sha).exists() {
             continue;
         }
         let tmp = paths.tmp_file(&format!("pre_chunk_{id:05}"));
-        let Some(sha) = download_stable_chunk(api, Remote::Pre, id, sha.clone(), &tmp).await?
+        let Some(sha) =
+            download_stable_chunk(api, Remote::Pre, id, sha.clone(), tmp.path()).await?
         else {
             warn!(chunk_id = id, "pre chunk kept changing on server, skipped");
             report.pre_chunks_skipped.push(id);
             continue;
         };
+        let dest = paths.pre_chunk(id, &sha);
         if local.get(&id) == Some(&sha) && dest.exists() {
-            let _ = std::fs::remove_file(&tmp);
             continue;
         }
         let files = {
-            let tmp = tmp.clone();
-            tokio::task::spawn_blocking(move || scan_pre_chunk(&tmp, id))
+            let tmp = tmp.path().to_path_buf();
+            let sha = sha.clone();
+            tokio::task::spawn_blocking(move || scan_pre_chunk(&tmp, id, &sha))
                 .await
                 .map_err(|e| Error::Other(e.to_string()))??
         };
-        // 서버는 곡 id·경로 순으로 묶으므로 곡이 추가돼도 기존 항목 위치는 그대로다.
-        std::fs::rename(&tmp, &dest)?;
+        // 차트 청크와 같이 해시가 든 새 이름으로 둔다.
+        tmp.persist(&dest)?;
         index.replace_pre_chunk(id, &sha, &files)?;
         report.pre_chunks_updated.push(id);
     }
 
     for &id in local.keys().filter(|id| !remote.contains_key(id)) {
         index.remove_pre_chunk(id)?;
-        let _ = std::fs::remove_file(paths.pre_chunk(id));
         report.pre_chunks_removed.push(id);
+    }
+    Ok(())
+}
+
+/// 청크 폴더를 인덱스에 맞춘다. 해시 없는 이전 이름은 인덱스 판 이름으로 옮기고,
+/// 인덱스가 가리키지 않는 파일(교체·삭제된 옛 판)은 지운다.
+/// 옛 판을 읽는 트리가 없을 때(시작할 때, 다음 동기화 전) 부른다.
+pub fn tidy_chunks(paths: &Paths, index: &Index) -> Result<()> {
+    let kinds = [
+        (
+            ChunkKind::Chart,
+            paths.charts(),
+            Paths::chart_chunk as fn(&Paths, u32, &str) -> std::path::PathBuf,
+            Paths::legacy_chart_chunk as fn(&Paths, u32) -> std::path::PathBuf,
+        ),
+        (
+            ChunkKind::Pre,
+            paths.pre(),
+            Paths::pre_chunk,
+            Paths::legacy_pre_chunk,
+        ),
+    ];
+    for (kind, dir, current, legacy) in kinds {
+        let mut keep = HashSet::new();
+        for (id, sha) in index.chunk_hashes(kind)? {
+            let dest = current(paths, id, &sha);
+            let old = legacy(paths, id);
+            if !dest.exists() && old.exists() {
+                std::fs::rename(&old, &dest)?;
+            }
+            keep.insert(dest);
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if keep.contains(&path) || !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => info!(?path, "removed old chunk file"),
+                // 읽는 중이라 못 지우면(Windows) 다음에 다시 한다.
+                Err(e) => warn!(?path, %e, "old chunk file removal failed"),
+            }
+        }
     }
     Ok(())
 }
@@ -179,7 +229,6 @@ async fn download_stable_chunk(
         if got == sha {
             return Ok(Some(sha));
         }
-        let _ = std::fs::remove_file(tmp);
         match remote.hashes(api).await?.remove(&id) {
             Some(now) if now == sha => {
                 return Err(Error::Integrity(format!(
@@ -221,7 +270,7 @@ async fn sync_manifests(api: &Api, index: &Index, report: &mut SyncReport) -> Re
 }
 
 /// 차트 청크 zip의 항목(`{sha256}{ext}`, 무압축)을 읽어 인덱스 행으로 만든다.
-pub fn scan_chart_chunk(path: &Path, chunk_id: u32) -> Result<Vec<ChartRow>> {
+pub fn scan_chart_chunk(path: &Path, chunk_id: u32, chunk_sha256: &str) -> Result<Vec<ChartRow>> {
     let file = std::fs::File::open(path)?;
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))?;
     let mut out = Vec::with_capacity(zip.len());
@@ -250,6 +299,7 @@ pub fn scan_chart_chunk(path: &Path, chunk_id: u32) -> Result<Vec<ChartRow>> {
             size: entry.size(),
             crc32: entry.crc32(),
             chunk_id,
+            chunk_sha256: chunk_sha256.to_string(),
             data_offset,
         });
     }
@@ -257,7 +307,7 @@ pub fn scan_chart_chunk(path: &Path, chunk_id: u32) -> Result<Vec<ChartRow>> {
 }
 
 /// 사전 청크 zip의 항목(`{song_id}/{곡 zip 안 경로}`, 무압축)을 읽어 인덱스 행으로 만든다.
-pub fn scan_pre_chunk(path: &Path, chunk_id: u32) -> Result<Vec<PreRow>> {
+pub fn scan_pre_chunk(path: &Path, chunk_id: u32, chunk_sha256: &str) -> Result<Vec<PreRow>> {
     let file = std::fs::File::open(path)?;
     let mut zip = zip::ZipArchive::new(std::io::BufReader::new(file))?;
     let mut out = Vec::with_capacity(zip.len());
@@ -286,6 +336,7 @@ pub fn scan_pre_chunk(path: &Path, chunk_id: u32) -> Result<Vec<PreRow>> {
             size: entry.size(),
             crc32: entry.crc32(),
             chunk_id,
+            chunk_sha256: chunk_sha256.to_string(),
             data_offset,
         });
     }

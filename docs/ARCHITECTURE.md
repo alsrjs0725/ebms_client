@@ -171,9 +171,13 @@ ebms_client/
 └─ servers/<server_id>/
    ├─ index.sqlite             # chunk, chart, song, song_file, cache_entry
    ├─ charts/                  # 청크 zip 원본 (가상 FS가 차트를 여기서 읽음)
+   │                           #   chart_chunk_<id>.<sha256 앞 16자>.zip. 교체 때 새 이름으로 두고
+   │                           #   옛 판은 트리를 다시 만든 뒤 다음 동기화에서 지움
+   ├─ pre/                     # 사전 청크 zip (이름 규칙은 charts/와 같음)
    ├─ cache/<song_id>/         # 받은 에셋
    ├─ session                  # 세션키 (키체인을 못 쓸 때만)
-   └─ tmp/
+   ├─ no_ticket_until          # 429 대기가 끝나는 시각
+   └─ tmp/                     # 받는 중인 파일. 시작·동기화 때 다른 프로세스가 남긴 오래된 파일을 지움
 ```
 
 | 테이블 | 주요 컬럼 |

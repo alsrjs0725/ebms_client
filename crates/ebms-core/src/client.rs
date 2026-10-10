@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tracing::warn;
+
 use crate::api::Api;
 use crate::cache::Cache;
 use crate::fetch::Fetcher;
@@ -61,12 +63,21 @@ impl Client {
         let api = Arc::new(Api::new(&opts.server)?);
         api.set_session(opts.session.clone());
         let index = Arc::new(Index::open(&paths.index())?);
+        // 아직 트리가 없으니 옛 청크 판과 이전 실행의 임시 파일을 정리해도 된다.
+        // 정리는 실패해도 계속한다.
+        if let Err(e) = crate::sync::tidy_chunks(&paths, &index) {
+            warn!(%e, "chunk cleanup failed");
+        }
+        paths.clean_tmp();
         let cache = Arc::new(Cache::new(
             paths.cache(),
             paths.tmp(),
             index.clone(),
             opts.cache_limit,
         ));
+        if let Err(e) = cache.remove_orphans() {
+            warn!(%e, "cache cleanup failed");
+        }
         let fetcher = Arc::new(Fetcher::new(api.clone(), cache, paths.clone()));
         Ok(Self {
             api,
@@ -77,7 +88,21 @@ impl Client {
     }
 
     /// 동기화한 뒤 서버에서 바뀌거나 사라진 곡의 캐시를 지운다.
+    /// 먼저 지난 동기화가 남긴 옛 청크 판과 버려진 임시 파일을 지운다. 지난 동기화 뒤
+    /// 트리를 다시 만들었어야 한다([`crate::hub`]가 그렇게 한다).
     pub async fn sync(&self) -> Result<SyncReport> {
+        let paths = self.paths.clone();
+        let index = self.index.clone();
+        let tidied = tokio::task::spawn_blocking(move || {
+            paths.clean_tmp();
+            crate::sync::tidy_chunks(&paths, &index)
+        })
+        .await
+        .map_err(|e| Error::Other(e.to_string()))
+        .and_then(|r| r);
+        if let Err(e) = tidied {
+            warn!(%e, "chunk cleanup failed");
+        }
         let report = sync_all(&self.api, &self.paths, &self.index).await?;
         let cache = self.fetcher.cache().clone();
         tokio::task::spawn_blocking(move || cache.drop_stale_songs())
