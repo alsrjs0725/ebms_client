@@ -168,6 +168,7 @@ ebms_client/
 ```
 <앱 데이터>/
 ├─ config.toml                 # 서버 목록, 마운트 위치
+├─ logs/ebms.<날짜>.log        # 상주 앱 로그 (하루 단위, 최근 7일). 설정 창에서 폴더를 열 수 있음
 └─ servers/<server_id>/
    ├─ index.sqlite             # chunk, chart, song, song_file, cache_entry
    ├─ charts/                  # 청크 zip 원본 (가상 FS가 차트를 여기서 읽음)
