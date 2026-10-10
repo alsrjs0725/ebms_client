@@ -91,7 +91,8 @@ impl Server {
         let _guard = self.sync_lock.lock().await;
         let result = self.client.sync().await;
         // 인덱스를 읽으므로 런타임 밖에서, 설정 창이 기다리지 않게 상태 잠금 밖에서.
-        if matches!(&result, Ok(report) if report.changed()) {
+        // 실패해도 일부 청크는 바뀌었을 수 있다. 다음 동기화가 옛 청크 판을 지우기 전에 다시 만든다.
+        if !matches!(&result, Ok(report) if !report.changed()) {
             let fs = self.fs.clone();
             let reloaded = tokio::task::spawn_blocking(move || fs.reload())
                 .await

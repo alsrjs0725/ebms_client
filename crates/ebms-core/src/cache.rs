@@ -155,6 +155,44 @@ impl Cache {
         Ok(freed)
     }
 
+    /// 인덱스에 없는 캐시 파일(넣는 도중 꺼져 rename만 된 파일 등)을 지운다. 지금 넣는 중일 수 있는
+    /// 최근 파일([`STALE_AGE`](crate::paths::STALE_AGE) 이내)은 남긴다. 지운 개수.
+    pub fn remove_orphans(&self) -> Result<usize> {
+        let _guard = self.evict_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(dirs) = std::fs::read_dir(&self.root) else {
+            return Ok(0);
+        };
+        let mut removed = 0;
+        for dir in dirs.flatten() {
+            let Some(song_id) = dir.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
+                continue;
+            };
+            let keys: std::collections::HashSet<String> = self
+                .index
+                .cache_song_paths(song_id)?
+                .iter()
+                .map(|(rel, _)| file_key(rel))
+                .collect();
+            let Ok(files) = std::fs::read_dir(dir.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let path = f.path();
+                let known = f.file_name().to_str().is_some_and(|n| keys.contains(n));
+                if known || !crate::paths::is_stale(&path) {
+                    continue;
+                }
+                if std::fs::remove_file(&path).is_ok() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            info!(removed, "removed cache files missing from index");
+        }
+        Ok(removed)
+    }
+
     /// 곡의 캐시 파일과 항목을 모두 지운다. 못 지운 파일은 로그만 남긴다. 지운 바이트 수.
     fn remove_song(&self, song_id: u32) -> Result<u64> {
         let mut freed = 0;
@@ -267,6 +305,34 @@ fn unique() -> u64 {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn test_remove_orphans_keeps_indexed_and_recent_files() -> Result<()> {
+        let dir = tempdir()?;
+        let index = Arc::new(Index::open(&dir.path().join("index.db"))?);
+        let tmp = dir.path().join("tmp");
+        std::fs::create_dir_all(&tmp)?;
+        let cache = Cache::new(dir.path().join("cache"), tmp, index, 1 << 30);
+
+        let kept = cache.put(1, "z", "a.wav", b"a")?;
+        let orphan = cache.path(1, "b.wav")?;
+        let recent = cache.path(1, "c.wav")?;
+        std::fs::write(&orphan, b"b")?;
+        std::fs::write(&recent, b"c")?;
+        let old = SystemTime::now() - crate::paths::STALE_AGE * 2;
+        for p in [&kept, &orphan] {
+            std::fs::File::options()
+                .write(true)
+                .open(p)?
+                .set_modified(old)?;
+        }
+
+        assert_eq!(cache.remove_orphans()?, 1);
+        assert!(kept.exists());
+        assert!(!orphan.exists());
+        assert!(recent.exists());
+        Ok(())
+    }
 
     #[test]
     fn test_path_uses_hash() -> Result<()> {

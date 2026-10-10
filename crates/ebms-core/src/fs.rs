@@ -229,15 +229,24 @@ impl EbmsFs {
         match source {
             Source::Chart {
                 chunk_id,
+                chunk_sha256,
                 data_offset,
-            } => read_at(&self.paths.chart_chunk(chunk_id), data_offset + offset, len)
-                .map(Plan::Done),
+            } => read_at(
+                &self.paths.chart_chunk(chunk_id, &chunk_sha256),
+                data_offset + offset,
+                len,
+            )
+            .map(Plan::Done),
             Source::Pre {
                 chunk_id,
+                chunk_sha256,
                 data_offset,
-            } => {
-                read_at(&self.paths.pre_chunk(chunk_id), data_offset + offset, len).map(Plan::Done)
-            }
+            } => read_at(
+                &self.paths.pre_chunk(chunk_id, &chunk_sha256),
+                data_offset + offset,
+                len,
+            )
+            .map(Plan::Done),
             Source::Asset { entry, .. } => {
                 match self
                     .fetcher

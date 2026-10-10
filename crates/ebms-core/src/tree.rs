@@ -29,10 +29,18 @@ pub const SONG_CACHE: usize = 256;
 /// 파일 내용을 어디서 읽는지.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// 로컬 차트 청크(무압축) 안의 바이트.
-    Chart { chunk_id: u32, data_offset: u64 },
+    /// 로컬 차트 청크(무압축) 안의 바이트. `chunk_sha256`은 오프셋이 가리키는 청크 판.
+    Chart {
+        chunk_id: u32,
+        chunk_sha256: Arc<str>,
+        data_offset: u64,
+    },
     /// 로컬 사전 청크(무압축) 안의 바이트. 동기화 때 받아 둔 배너·프리뷰 등.
-    Pre { chunk_id: u32, data_offset: u64 },
+    Pre {
+        chunk_id: u32,
+        chunk_sha256: Arc<str>,
+        data_offset: u64,
+    },
     /// 곡 zip 안의 파일. 처음 읽을 때 받는다.
     Asset { song_id: u32, entry: Arc<FileEntry> },
 }
@@ -444,6 +452,7 @@ impl SongTree {
             {
                 source = Source::Pre {
                     chunk_id: p.chunk_id,
+                    chunk_sha256: p.chunk_sha256.as_str().into(),
                     data_offset: p.data_offset,
                 };
             } else if crate::is_chart_path(&entry.path) {
@@ -455,6 +464,7 @@ impl SongTree {
                     let c = unmatched.swap_remove(pos);
                     source = Source::Chart {
                         chunk_id: c.chunk_id,
+                        chunk_sha256: c.chunk_sha256.as_str().into(),
                         data_offset: c.data_offset,
                     };
                 }
@@ -471,6 +481,7 @@ impl SongTree {
                 c.size,
                 Source::Chart {
                     chunk_id: c.chunk_id,
+                    chunk_sha256: c.chunk_sha256.as_str().into(),
                     data_offset: c.data_offset,
                 },
             );
@@ -692,6 +703,7 @@ mod tests {
             size,
             crc32: crc,
             chunk_id: 0,
+            chunk_sha256: "c".repeat(64),
             data_offset: 100,
         }
     }

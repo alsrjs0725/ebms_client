@@ -611,6 +611,79 @@ fn sync_rejects_corrupt_chart_chunk() {
     env.state.server().corrupt_chart = true;
     let err = env.rt.block_on(env.client.sync()).unwrap_err();
     assert!(matches!(err, Error::Integrity(_)), "{err}");
+    // 실패한 청크의 임시 파일이 남지 않는다.
+    assert_eq!(
+        dir_files(&env._dir.path().join("tmp")),
+        Vec::<String>::new()
+    );
+}
+
+/// 폴더 안 파일 이름(정렬).
+fn dir_files(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn replaced_chart_chunk_never_serves_shifted_bytes() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    let chart = format!("{SONG}/_7a.bme");
+    assert_eq!(read_all(&fs, &chart).unwrap(), env.fixture.chart_a);
+
+    // 서버가 청크를 다시 만들어 기존 차트 위치가 밀렸다.
+    let added = b"#TITLE Inserted first, shifts every offset\r\n".to_vec();
+    let sha_a = sha(&env.fixture.chart_a);
+    let sha_b = sha(&env.fixture.chart_b);
+    let chunk = chart_chunk(&[
+        (&format!("{}.bms", sha(&added)), &added),
+        (&format!("{sha_a}.bme"), &env.fixture.chart_a),
+        (&format!("{sha_b}.bme"), &env.fixture.chart_b),
+    ]);
+    env.state.server().chart_chunks.insert(0, chunk);
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.chart_chunks_updated, vec![0]);
+
+    // 트리를 다시 만들기 전의 옛 트리도, 새 트리도 맞는 바이트를 읽는다.
+    assert_eq!(read_all(&fs, &chart).unwrap(), env.fixture.chart_a);
+    let fresh = env.client.fs(env.rt.handle().clone()).unwrap();
+    assert_eq!(read_all(&fresh, &chart).unwrap(), env.fixture.chart_a);
+
+    // 옛 판은 다음 동기화 때 지운다.
+    let charts = env._dir.path().join("charts");
+    assert_eq!(dir_files(&charts).len(), 2);
+    env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(dir_files(&charts).len(), 1);
+    assert_eq!(read_all(&fresh, &chart).unwrap(), env.fixture.chart_a);
+}
+
+#[test]
+fn legacy_chunk_names_are_migrated_on_open() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let charts = env._dir.path().join("charts");
+    let [name] = &dir_files(&charts)[..] else {
+        panic!("one chart chunk expected");
+    };
+    std::fs::rename(charts.join(name), charts.join("chart_chunk_00000.zip")).unwrap();
+
+    let mut opts = Options::new(&env.url, env._dir.path());
+    opts.session = Some(KEY.to_string());
+    let client = Client::open(&opts).unwrap();
+    assert_eq!(dir_files(&charts), vec![name.clone()]);
+    let fs = client.fs(env.rt.handle().clone()).unwrap();
+    assert_eq!(
+        read_all(&fs, &format!("{SONG}/_7a.bme")).unwrap(),
+        env.fixture.chart_a
+    );
+    // 다시 받지 않는다.
+    assert!(!env.rt.block_on(client.sync()).unwrap().changed());
+    assert_eq!(env.state.counters.chart_chunk.load(Ordering::SeqCst), 1);
 }
 
 #[test]
