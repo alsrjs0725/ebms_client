@@ -101,6 +101,9 @@ pub struct CacheRow {
     pub pinned: bool,
 }
 
+/// `(song_id, 캐시에 기록된 zip 해시, 매니페스트의 zip 해시)`
+pub type CacheSongVersion = (u32, Option<String>, Option<String>);
+
 /// 로컬 SQLite 인덱스.
 pub struct Index {
     con: Mutex<Connection>,
@@ -390,7 +393,7 @@ impl Index {
 
     /// 캐시에 파일이 있는 곡마다 `(song_id, 기록된 zip 해시, 매니페스트의 zip 해시)`.
     /// 매니페스트에 없는 곡은 세 번째가 `None`.
-    pub fn cache_song_versions(&self) -> Result<Vec<(u32, Option<String>, Option<String>)>> {
+    pub fn cache_song_versions(&self) -> Result<Vec<CacheSongVersion>> {
         let con = self.con();
         let mut stmt = con.prepare(
             "SELECT e.song_id, c.zip_sha256, json_extract(s.manifest, '$.zip_sha256')
