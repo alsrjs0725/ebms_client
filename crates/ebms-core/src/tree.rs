@@ -225,6 +225,12 @@ impl Tree {
         self.songs.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 곡 폴더(노드 0)인지. 파일 목록을 읽지 않고 루트만 본다. 구동기가 곡 DB를 만들며 서버 폴더를 훑을 때
+    /// 곡 폴더마다 속성을 묻는데, 그때마다 매니페스트를 읽어 트리를 만들면 곡 수만큼 CPU를 쓴다.
+    fn is_song_dir(&self, ino: Ino) -> bool {
+        split(ino).is_some_and(|(song_id, idx)| idx == 0 && self.by_song.contains_key(&song_id))
+    }
+
     fn node(&self, ino: Ino) -> Option<(Arc<SongTree>, usize)> {
         let (song_id, idx) = split(ino)?;
         let song = self.load(song_id)?;
@@ -232,7 +238,7 @@ impl Tree {
     }
 
     pub fn get(&self, ino: Ino) -> Option<Stat> {
-        if ino == ROOT {
+        if ino == ROOT || self.is_song_dir(ino) {
             return Some(Stat {
                 ino,
                 is_dir: true,
@@ -244,7 +250,7 @@ impl Tree {
     }
 
     pub fn parent(&self, ino: Ino) -> Option<Ino> {
-        if ino == ROOT {
+        if ino == ROOT || self.is_song_dir(ino) {
             return Some(ROOT);
         }
         let (song, idx) = self.node(ino)?;
@@ -866,6 +872,38 @@ mod tests {
             mem.loads.load(std::sync::atomic::Ordering::Relaxed),
             before + 1
         );
+    }
+
+    #[test]
+    fn listing_song_folders_does_not_load_songs() {
+        let songs = (0..SONG_CACHE as u32 * 2)
+            .map(|id| SongManifest {
+                song_id: id,
+                folder: format!("s{id}"),
+                zip_size: 0,
+                zip_sha256: String::new(),
+                charts: vec![],
+                files: vec![entry("a.ogg", 1, 0)],
+            })
+            .collect();
+        let (tree, mem) = tree(Mem {
+            songs,
+            ..Default::default()
+        });
+        let mut dirs = Vec::new();
+        tree.read_dir(ROOT, 0, |ino, _, _| {
+            dirs.push(ino);
+            false
+        });
+        assert_eq!(dirs.len(), SONG_CACHE * 2);
+        for &ino in &dirs {
+            assert!(tree.get(ino).unwrap().is_dir);
+            assert_eq!(tree.parent(ino), Some(ROOT));
+        }
+        assert!(tree.lookup(ROOT, "00003 s3").is_some());
+        assert_eq!(mem.loads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        // 없는 곡의 폴더 ino는 그대로 없다.
+        assert!(tree.get(song_ino(SONG_CACHE as u32 * 2).unwrap()).is_none());
     }
 
     #[test]
