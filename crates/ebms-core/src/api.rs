@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use reqwest::{Method, StatusCode, Url, header};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::warn;
 
 use crate::manifest::SongManifest;
@@ -20,6 +20,9 @@ const DEFAULT_RETRY_AFTER: u64 = 60;
 
 /// 응답 바이트가 이만큼 오지 않으면 연결이 멈춘 것으로 본다.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 플레이 다운로드가 중간에 끊겼을 때 이어받기를 시도할 횟수.
+const MAX_RESUME: u32 = 3;
 
 /// 사전 파일 하나를 받는 전체 시간 상한. 감속 중에도 프리뷰 몇 MB는 받을 수 있게 넉넉히.
 const PRE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -359,21 +362,103 @@ impl Api {
     // ---- 플레이 다운로드 ----
 
     /// 곡 zip 전체를 `dest`에 저장하고 sha256을 돌려준다. 서버에서 티켓 1개가 빠진다.
+    ///
+    /// 전송이 중간에 끊기면 `Range` + `If-Range: <ETag>`로 받은 데까지 이어받는다.
+    /// 서버는 grant 시간 안의 이어받기(206)에는 티켓을 더 쓰지 않는다.
     pub async fn play_song(&self, song_id: u32, dest: &Path) -> Result<String> {
-        let resp = self.get(&format!("/api/play/song/{song_id}")).await?;
-        save(resp, dest).await
+        let path = format!("/api/play/song/{song_id}");
+        let url = self.url(&path);
+        let resp = self.get(&path).await?;
+        // ETag가 없는 서버면 이어받지 않는다.
+        let etag = resp.headers().get(header::ETAG).cloned();
+        let mut file = tokio::fs::File::create(dest).await?;
+        let mut hasher = Sha256::new();
+        let mut written = 0u64;
+        let mut next: Result<reqwest::Response> = Ok(resp);
+        let mut attempt = 0;
+        loop {
+            let err = match next {
+                Ok(r) => match copy_body(r, &mut file, &mut hasher, &mut written).await {
+                    Ok(()) => break,
+                    Err(e) => e,
+                },
+                Err(e) => e,
+            };
+            // 네트워크 오류만 이어받는다. 상태 코드·디스크 오류는 그대로 돌려준다.
+            let Some(etag) = etag.as_ref().filter(|_| matches!(err, Error::Http(_))) else {
+                return Err(err);
+            };
+            if attempt >= MAX_RESUME {
+                return Err(err);
+            }
+            attempt += 1;
+            warn!(song_id, written, attempt, %err, "play download interrupted, resuming");
+            tokio::time::sleep(Duration::from_millis(250 << attempt)).await;
+            let r = match self
+                .request(Method::GET, &url)
+                .header(header::RANGE, format!("bytes={written}-"))
+                .header(header::IF_RANGE, etag.clone())
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    next = Err(e.into());
+                    continue;
+                }
+            };
+            if r.status() == StatusCode::PARTIAL_CONTENT {
+                if content_range_start(&r) != Some(written) {
+                    return Err(Error::Other(format!(
+                        "song {song_id}: unexpected Content-Range on resume"
+                    )));
+                }
+                next = Ok(r);
+            } else {
+                // 200이면 서버가 처음부터 다시 보냈다(If-Range 불일치 등). 받은 것을 버린다.
+                let r = self.check(r, StatusCode::OK)?;
+                file.set_len(0).await?;
+                file.seek(std::io::SeekFrom::Start(0)).await?;
+                hasher = Sha256::new();
+                written = 0;
+                next = Ok(r);
+            }
+        }
+        file.flush().await?;
+        file.sync_all().await?;
+        Ok(hex::encode(hasher.finalize()))
     }
+}
+
+/// 응답 본문을 `file` 끝에 덧붙이고 해시·받은 크기를 갱신한다.
+async fn copy_body(
+    resp: reqwest::Response,
+    file: &mut tokio::fs::File,
+    hasher: &mut Sha256,
+    written: &mut u64,
+) -> Result<()> {
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        file.write_all(&chunk).await?;
+        hasher.update(&chunk);
+        *written += chunk.len() as u64;
+    }
+    Ok(())
+}
+
+/// `Content-Range: bytes <start>-<end>/<total>`의 시작 위치.
+fn content_range_start(resp: &reqwest::Response) -> Option<u64> {
+    let v = resp.headers().get(header::CONTENT_RANGE)?.to_str().ok()?;
+    let range = v.trim().strip_prefix("bytes ")?;
+    range.split('-').next()?.trim().parse().ok()
 }
 
 async fn save(resp: reqwest::Response, dest: &Path) -> Result<String> {
     let mut file = tokio::fs::File::create(dest).await?;
     let mut hasher = Sha256::new();
-    let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        hasher.update(&chunk);
-        file.write_all(&chunk).await?;
-    }
+    let mut written = 0;
+    copy_body(resp, &mut file, &mut hasher, &mut written).await?;
     file.flush().await?;
     file.sync_all().await?;
     Ok(hex::encode(hasher.finalize()))
