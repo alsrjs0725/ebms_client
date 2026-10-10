@@ -49,13 +49,18 @@ struct Server {
     retry_after: String,
     /// 남은 횟수만큼 청크 다운로드 직전에 그 청크에 차트를 덧붙인다. 곡 추가 중인 서버 흉내.
     appends_on_download: usize,
+    /// 남은 횟수만큼 플레이 다운로드를 절반만 보내고 연결을 끊는다.
+    play_cuts: usize,
     /// 켜 두면 청크 본문을 해시 목록과 다르게 망가뜨려 보낸다.
     corrupt_chart: bool,
 }
 
 #[derive(Default)]
 struct Counters {
+    /// 티켓을 쓰는 플레이 다운로드 요청(이어받기 제외)
     play: AtomicUsize,
+    /// 플레이 다운로드 이어받기(206) 요청
+    play_resume: AtomicUsize,
     pre_file: AtomicUsize,
     chart_chunk: AtomicUsize,
     pre_chunk: AtomicUsize,
@@ -111,6 +116,27 @@ fn me_json() -> serde_json::Value {
         "pre": {"month": "2026-10", "used_bytes": 0, "limit_bytes": 10737418240u64,
                 "throttled_kbps": 500, "throttled": false},
     })
+}
+
+/// 플레이 다운로드 본문. `play_cuts`가 남았으면 절반만 보내고 끊는다.
+fn play_body(server: &mut Server, data: Vec<u8>) -> axum::body::Body {
+    if server.play_cuts == 0 {
+        return data.into();
+    }
+    server.play_cuts -= 1;
+    let half = bytes::Bytes::from(data[..data.len() / 2].to_vec());
+    // 헤더와 앞부분이 나간 뒤에 끊기도록 잠시 기다린다.
+    let stream = futures_util::stream::unfold(Some(half), |half| async move {
+        let item = match half {
+            Some(half) => Ok(half),
+            None => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Err(std::io::Error::other("cut"))
+            }
+        };
+        Some((item, None))
+    });
+    axum::body::Body::from_stream(futures_util::StreamExt::take(stream, 2))
 }
 
 fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
@@ -266,8 +292,32 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                 if let Err(status) = s.authorized(&headers) {
                     return status.into_response();
                 }
-                s.counters.play.fetch_add(1, Ordering::SeqCst);
                 let mut server = s.server();
+                let song = server.songs[&id].clone();
+                let etag = format!("\"{}\"", sha(&song));
+                // grant 안의 이어받기는 티켓을 쓰지 않는다(If-Range가 맞을 때만).
+                let start = headers
+                    .get(header::RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("bytes="))
+                    .and_then(|v| v.strip_suffix('-'))
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .filter(|_| {
+                        headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok())
+                            == Some(etag.as_str())
+                    });
+                if let Some(start) = start {
+                    s.counters.play_resume.fetch_add(1, Ordering::SeqCst);
+                    let body = play_body(&mut server, song[start..].to_vec());
+                    let range = format!("bytes {start}-{}/{}", song.len() - 1, song.len());
+                    return (
+                        StatusCode::PARTIAL_CONTENT,
+                        [(header::ETAG, etag), (header::CONTENT_RANGE, range)],
+                        body,
+                    )
+                        .into_response();
+                }
+                s.counters.play.fetch_add(1, Ordering::SeqCst);
                 if server.tickets == 0 {
                     let retry_after = match server.retry_after.as_str() {
                         "" => "30".to_string(),
@@ -281,7 +331,8 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                         .into_response();
                 }
                 server.tickets -= 1;
-                server.songs[&id].clone().into_response()
+                let body = play_body(&mut server, song);
+                ([(header::ETAG, etag)], body).into_response()
             }),
         )
         .with_state(state);
@@ -874,6 +925,41 @@ fn huge_retry_after_is_clamped_not_a_panic() {
         "{err}"
     );
     assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn interrupted_play_download_resumes_without_another_ticket() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    env.state.server().play_cuts = 2;
+
+    assert_eq!(
+        read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap(),
+        env.want("bgm01.wav")
+    );
+    let c = &env.state.counters;
+    assert_eq!(c.play.load(Ordering::SeqCst), 1);
+    assert_eq!(c.play_resume.load(Ordering::SeqCst), 2);
+    assert_eq!(env.state.server().tickets, 4);
+    assert_eq!(
+        read_all(&fs, &format!("{SONG}/bga/movie.mp4")).unwrap(),
+        env.want("bga/movie.mp4")
+    );
+}
+
+#[test]
+fn play_download_gives_up_after_a_few_resumes() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    env.state.server().play_cuts = 100;
+
+    let err = read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap_err();
+    assert!(matches!(err, Error::Http(_)), "{err}");
+    let c = &env.state.counters;
+    assert_eq!(c.play.load(Ordering::SeqCst), 1);
+    assert_eq!(c.play_resume.load(Ordering::SeqCst), 3);
 }
 
 #[test]
