@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 /// <root>/pre/pre_chunk_00000.zip
 /// <root>/cache/<song_id>/<path>
 /// <root>/tmp/
+/// <root>/no_ticket_until
 /// ```
 #[derive(Clone, Debug)]
 pub struct Paths {
@@ -59,6 +60,11 @@ impl Paths {
     pub fn tmp_file(&self, name: &str) -> PathBuf {
         self.tmp()
             .join(format!("{name}.{}.part", std::process::id()))
+    }
+
+    /// 티켓이 없어 플레이 다운로드를 멈춘 경우 다시 시도할 시각(unix 초).
+    pub fn no_ticket(&self) -> PathBuf {
+        self.root.join("no_ticket_until")
     }
 
     pub fn root(&self) -> &Path {
