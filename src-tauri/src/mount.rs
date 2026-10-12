@@ -1,4 +1,4 @@
-//! 가상 드라이브 마운트. Linux는 FUSE, Windows는 WinFsp. macOS는 아직 없음.
+//! 가상 드라이브 마운트. Windows는 WinFsp. Linux FUSE는 지원 중단(개발용으로만 남김), macOS는 없음.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
