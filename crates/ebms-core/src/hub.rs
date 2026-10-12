@@ -268,14 +268,13 @@ impl Hub {
     pub async fn login(
         &self,
         id: &str,
-        device_name: &str,
         timeout: Duration,
         open_browser: impl FnOnce(&str),
     ) -> Result<User> {
         let server = self.server(id)?;
         // 진행 중인 요청이 새 세션키를 덮어쓰지 않도록 따로 받는다.
         let api = Api::new(&server.entry.url)?;
-        let req = LoginRequest::start(&api, device_name).await?;
+        let req = LoginRequest::start(&api).await?;
         open_browser(req.url());
         let token = req.finish(&api, timeout).await?;
         let store = self.session(&server.entry);

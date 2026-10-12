@@ -42,9 +42,6 @@ enum Cmd {
         /// 브라우저를 열지 않고 주소만 출력
         #[arg(long)]
         no_browser: bool,
-        /// 서버의 기기 목록에 보일 이름
-        #[arg(long)]
-        device_name: Option<String>,
     },
     /// 세션키를 폐기하고 지움
     Logout,
@@ -147,15 +144,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.cmd {
         Cmd::Server(cmd) => server_cmd(&rt, &mut app, cmd)?,
-        Cmd::Login {
-            no_browser,
-            device_name,
-        } => {
+        Cmd::Login { no_browser } => {
             let server = app.server(sel)?;
             let api = Api::new(&server.url)?;
-            let device_name =
-                device_name.unwrap_or_else(|| ebms_core::auth::device_name("ebms-cli"));
-            let req = rt.block_on(LoginRequest::start(&api, &device_name))?;
+            let req = rt.block_on(LoginRequest::start(&api))?;
             eprintln!("Log in with your browser:\n{}", req.url());
             if !no_browser && let Err(e) = open::that_detached(req.url()) {
                 tracing::warn!(%e, "could not open browser");

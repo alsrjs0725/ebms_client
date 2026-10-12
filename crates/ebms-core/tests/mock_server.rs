@@ -108,9 +108,8 @@ fn me_json() -> serde_json::Value {
     json!({
         "id": "0b5f3c1e-0000-4000-8000-000000000001",
         "display_name": "Tester",
-        "email": null,
         "role": "user",
-        "oauths": [{"oauth": "google", "name": "tester@example.com"}],
+        "oauths": [{"oauth": "google", "name": "Tester"}],
         "session": {"kind": "client"},
         "tickets": {"available": 5, "max": 5, "refill_seconds": 60, "next_refill_at": null},
         "pre": {"month": "2026-10", "used_bytes": 0, "limit_bytes": 10737418240u64,
@@ -155,7 +154,7 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                 let redirect = &q["redirect_uri"];
                 assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
                 assert_eq!(q["code_challenge_method"], "S256");
-                assert!(!q["device_name"].is_empty());
+                assert!(!q.contains_key("device_name"));
                 let code = format!("code-{}", s.server().codes.len());
                 s.server().codes.insert(code.clone(), q["code_challenge"].clone());
                 Redirect::to(&format!("{redirect}?code={code}&state={}", q["state"]))
@@ -179,8 +178,7 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                 axum::Json(json!({
                     "session_key": KEY,
                     "expires_at": 4102444800i64,
-                    "user": {"id": user["id"], "display_name": user["display_name"],
-                             "email": null, "role": "user"},
+                    "user": {"id": user["id"], "display_name": user["display_name"], "role": "user"},
                 }))
                 .into_response()
             }),
@@ -552,7 +550,7 @@ fn browser_login_gets_session_key_and_logout_revokes_it() {
     assert!(api.needs_login());
 
     let token = env.rt.block_on(async {
-        let req = LoginRequest::start(&api, "test device").await.unwrap();
+        let req = LoginRequest::start(&api).await.unwrap();
         // 브라우저 대신: 로그인 주소를 열면 서버가 루프백 주소로 리다이렉트한다.
         let browser = tokio::spawn({
             let url = req.url().to_string();
@@ -1158,7 +1156,7 @@ fn several_servers_show_as_top_level_folders() {
         assert!(hub.me(&a.entry.id).await.unwrap().is_none());
         for s in [&a, &b] {
             let user = hub
-                .login(&s.entry.id, "test", Duration::from_secs(10), fake_browser)
+                .login(&s.entry.id, Duration::from_secs(10), fake_browser)
                 .await
                 .unwrap();
             assert_eq!(user.display_name, "Tester");
