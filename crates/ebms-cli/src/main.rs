@@ -342,11 +342,7 @@ fn whoami(rt: &tokio::runtime::Runtime, app: &App, server: &ServerEntry) -> anyh
     if me.user.role != "user" {
         println!("role: {}", me.user.role);
     }
-    let oauths: Vec<String> = me
-        .oauths
-        .iter()
-        .map(|o| format!("{} {}", o.oauth, o.name).trim().to_string())
-        .collect();
+    let oauths: Vec<&str> = me.oauths.iter().map(|o| o.oauth.as_str()).collect();
     println!("oauth: {}", oauths.join(", "));
     let t = &me.tickets;
     let refill = match t.next_refill_at {

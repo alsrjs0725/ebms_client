@@ -109,7 +109,7 @@ fn me_json() -> serde_json::Value {
         "id": "0b5f3c1e-0000-4000-8000-000000000001",
         "display_name": "Tester",
         "role": "user",
-        "oauths": [{"oauth": "google", "name": "Tester"}],
+        "oauths": [{"oauth": "google"}],
         "session": {"kind": "client"},
         "tickets": {"available": 5, "max": 5, "refill_seconds": 60, "next_refill_at": null},
         "pre": {"month": "2026-10", "used_bytes": 0, "limit_bytes": 10737418240u64,

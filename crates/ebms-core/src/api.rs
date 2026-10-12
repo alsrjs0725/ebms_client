@@ -100,7 +100,6 @@ pub struct Me {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LinkedOAuth {
     pub oauth: String,
-    pub name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
