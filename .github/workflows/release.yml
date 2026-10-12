@@ -19,9 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            platform: linux-x64
-            exe: ""
+          # Windows 전용. Linux 빌드는 배포하지 않는다 (FUSE 백엔드는 개발용으로만 남김)
           - os: windows-latest
             platform: windows-x64
             exe: ".exe"
@@ -30,8 +28,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev
       - run: cargo test --workspace
       - run: cargo build --release -p ebms-app --features tauri/custom-protocol
       - run: cargo build --release -p ebms-cli
@@ -42,7 +38,7 @@ jobs:
           mkdir -p "dist/$name"
           cp "target/release/ebms-app${{ matrix.exe }}" "target/release/ebms${{ matrix.exe }}" README.md LICENSE "dist/$name/"
           cd dist
-          if [ "$RUNNER_OS" = "Windows" ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+          7z a "$name.zip" "$name" >/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: ebms-${{ matrix.platform }}
@@ -64,7 +60,7 @@ jobs:
       - name: GitHub Release 업로드
         run: |
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version *= *"\(.*\)"/\1/p' Cargo.toml)
-          notes="커밋 ${GITHUB_SHA::7} (${GITHUB_REF_NAME}). Windows 가상 드라이브에는 WinFsp(https://winfsp.dev/rel/) 설치가 필요합니다. Linux 실행에는 libwebkit2gtk-4.1, fuse3 패키지가 필요합니다."
+          notes="커밋 ${GITHUB_SHA::7} (${GITHUB_REF_NAME}). Windows 가상 드라이브에는 WinFsp(https://winfsp.dev/rel/) 설치가 필요합니다."
           if [ "$GITHUB_REF_NAME" = "release" ]; then
             tag="v$version"
             if gh release view "$tag" >/dev/null 2>&1; then

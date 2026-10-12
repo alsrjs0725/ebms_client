@@ -37,7 +37,7 @@ E:\ (또는 ~/ebms 마운트 지점)
 
 ### 비기능
 - 상주 중 메모리 수십 MB 이하, 유휴 시 CPU·네트워크 사용 거의 없음. 설정 창(웹뷰)은 닫으면 해제.
-- Windows 우선, Linux 지원, macOS는 PoC 후 결정 (§5 참고).
+- Windows 전용. Linux 클라이언트는 지원 중단(배포하지 않음, FUSE 백엔드는 개발용으로만 남김), macOS는 계획 없음 (§5 참고).
 - 곡 고르는 화면에서 스크롤만 해도 곡 전체가 받아지는 일이 없어야 함 (§6).
 - 오프라인이면 캐시에 있는 곡은 그대로 플레이 가능, 없는 파일은 읽기 오류.
 - 다운로드 중 앱이 죽어도 캐시가 깨지지 않음 (임시 파일 → 검증 → rename).
@@ -49,7 +49,7 @@ E:\ (또는 ~/ebms 마운트 지점)
 | 용도 | 크레이트/도구 |
 | --- | --- |
 | 가상 FS (Windows) | `winfsp` 0.13 (WinFsp 2.1 바인딩) |
-| 가상 FS (Linux, macOS) | `fuser` 0.18 |
+| 가상 FS (Linux, 개발용·지원 중단) | `fuser` 0.18 |
 | 비동기/HTTP | `tokio`, `reqwest` (stream, Range, rustls) |
 | zip | `zip` |
 | 해시 | `sha2`, `md-5` |
@@ -92,8 +92,8 @@ E:\ (또는 ~/ebms 마운트 지점)
 | OS | 선택 | 이유 / 대안 |
 | --- | --- | --- |
 | Windows | **WinFsp** | 진짜 가상 드라이브, 읽기 대기 시간 제한 없음, rclone·sshfs-win이 쓰는 검증된 드라이버. 설치기에 WinFsp 포함 필요. 대안 Cloud Files API(`cloud-filter`, OneDrive 방식)는 드라이버 설치가 없지만 10만 개 이상 placeholder를 실제 NTFS에 만들어야 하고 콜백 60초 제한이 있어 2순위 |
-| Linux | **FUSE** (`fuser`) | 표준. `fuse3` 패키지만 있으면 됨 |
-| macOS | **보류** | macFUSE는 커널 확장 승인이 필요하고, FUSE-T(커널 확장 없음)는 `fuser` 호환을 PoC로 확인해야 함. beatoraja 사용자 비중이 낮아 마지막 단계로 |
+| Linux | **지원 중단** | FUSE(`fuser`) 백엔드는 코어 개발·테스트용으로만 남기고 배포하지 않음 |
+| macOS | **계획 없음** | Windows 전용으로 결정 |
 
 ## 6. 다운로드 전략 (핵심)
 
@@ -155,7 +155,7 @@ ebms_client/
 ├─ crates/
 │  ├─ ebms-core/src/{api,sync,bms,tree,fetcher,cache,vfs}/
 │  ├─ ebms-vfs-winfsp/        # Windows 백엔드
-│  ├─ ebms-vfs-fuse/          # Linux/macOS 백엔드
+│  ├─ ebms-vfs-fuse/          # Linux 백엔드 (지원 중단, 개발용)
 │  └─ ebms-cli/
 ├─ src-tauri/                 # 상주 프로세스 + 설정 창 (ebms-app)
 ├─ ui/                        # 설정 창 (HTML·JS, 빌드 단계 없음)
@@ -203,4 +203,4 @@ ebms_client/
 2. Linux FUSE 백엔드: 같은 코어를 실제 마운트로 검증
 3. **Windows WinFsp 백엔드 + beatoraja 확인** (백엔드 완료: `ebms-vfs-winfsp`. 남음: Windows 실기에서 beatoraja 확인)
 4. 상주 프로세스, 설정 창 (완료: Linux 마운트, 서버·로그인 관리) / 남음: 자동 시작, 설치기(WinFsp 포함)
-5. macOS 검토
+5. ~~macOS 검토~~ (Windows 전용으로 결정, Linux 지원 중단)
