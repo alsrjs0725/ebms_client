@@ -94,7 +94,7 @@ function renderServer(s) {
   const dl = li.querySelector(".account");
   if (s.me) {
     const me = s.me;
-    addRow(dl, "계정", me.email ? `${me.display_name} (${me.email})` : me.display_name);
+    addRow(dl, "계정", me.display_name);
     const oauths = me.oauths.map((o) => OAUTH_NAMES[o.oauth] || o.oauth);
     addRow(dl, "로그인 수단", oauths.length ? `${oauths.join(", ")}로 로그인 가능` : "-");
     const t = me.tickets;

@@ -82,7 +82,6 @@ pub struct User {
     /// 서버 안의 계정 UUID. 서버마다 다르다.
     pub id: String,
     pub display_name: String,
-    pub email: Option<String>,
     pub role: String,
 }
 
@@ -101,7 +100,6 @@ pub struct Me {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LinkedOAuth {
     pub oauth: String,
-    pub name: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -245,7 +243,6 @@ impl Api {
         redirect_uri: &str,
         state: &str,
         code_challenge: &str,
-        device_name: &str,
     ) -> Result<String> {
         let mut url = Url::parse(&self.url("/auth/client/authorize"))
             .map_err(|e| Error::Config(format!("bad server url {}: {e}", self.base)))?;
@@ -253,8 +250,7 @@ impl Api {
             .append_pair("redirect_uri", redirect_uri)
             .append_pair("state", state)
             .append_pair("code_challenge", code_challenge)
-            .append_pair("code_challenge_method", "S256")
-            .append_pair("device_name", device_name);
+            .append_pair("code_challenge_method", "S256");
         Ok(url.into())
     }
 

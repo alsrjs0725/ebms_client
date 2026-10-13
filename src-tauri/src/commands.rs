@@ -120,8 +120,7 @@ pub async fn clear_cache(state: State<'_, AppState>, id: String) -> CmdResult<u6
 #[tauri::command]
 pub async fn login(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let hub = state.hub.clone();
-    let device = ebms_core::auth::device_name("EBMS");
-    hub.login(&id, &device, LOGIN_TIMEOUT, |url| {
+    hub.login(&id, LOGIN_TIMEOUT, |url| {
         if let Err(e) = open::that_detached(url) {
             tracing::warn!(%e, url, "could not open browser");
         }

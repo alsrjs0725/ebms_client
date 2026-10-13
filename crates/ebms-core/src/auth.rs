@@ -30,23 +30,6 @@ const DONE_HTML: &str = "<!doctype html><meta charset=utf-8><title>EBMS</title>\
 const FAIL_HTML: &str = "<!doctype html><meta charset=utf-8><title>EBMS</title>\
 <p>로그인하지 못했습니다. 클라이언트에서 다시 시도해 주세요.</p>";
 
-/// 서버의 기기 목록에 보일 이름. `{app} ({호스트 이름})`.
-pub fn device_name(app: &str) -> String {
-    let host = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .ok()
-        .or_else(|| {
-            std::fs::read_to_string("/etc/hostname")
-                .ok()
-                .map(|s| s.trim().to_string())
-        })
-        .filter(|s| !s.is_empty());
-    match host {
-        Some(h) => format!("{app} ({h})"),
-        None => app.to_string(),
-    }
-}
-
 /// PKCE 값 한 쌍.
 pub struct Pkce {
     pub verifier: String,
@@ -82,13 +65,14 @@ pub struct LoginRequest {
 
 impl LoginRequest {
     /// 루프백 수신을 열고 브라우저로 열 주소를 만든다.
-    pub async fn start(api: &Api, device_name: &str) -> Result<Self> {
+    /// 기기 이름(PC 호스트명)은 보내지 않는다(ebms_server#102).
+    pub async fn start(api: &Api) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
         let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
         let state = random_token()?;
         let pkce = Pkce::generate()?;
-        let url = api.authorize_url(&redirect_uri, &state, &pkce.challenge, device_name)?;
+        let url = api.authorize_url(&redirect_uri, &state, &pkce.challenge)?;
         Ok(Self {
             listener,
             state,
