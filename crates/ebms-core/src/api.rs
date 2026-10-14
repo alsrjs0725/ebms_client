@@ -107,8 +107,21 @@ pub struct Tickets {
     pub available: u32,
     pub max: u32,
     pub refill_seconds: u64,
-    /// 다음 티켓이 차는 시각(unix 초). 가득 찼으면 None.
+    /// 다음 티켓이 차는 시각(unix 초, 이 PC 시계 기준). 가득 찼으면 None.
     pub next_refill_at: Option<i64>,
+    /// 다음 티켓이 찰 때까지 남은 초(서버가 계산). 이전 서버는 보내지 않는다.
+    #[serde(default)]
+    pub next_refill_in: Option<i64>,
+}
+
+impl Tickets {
+    /// 서버 시각인 `next_refill_at`을 남은 초로 이 PC 시계에 맞춘다.
+    /// PC와 서버 시계가 어긋나면(시간대 설정 오류 등) 서버 시각을 그대로 빼면 남은 시간이 엉뚱하게 나온다.
+    fn localize(&mut self, now: i64) {
+        if let (Some(_), Some(secs)) = (self.next_refill_at, self.next_refill_in) {
+            self.next_refill_at = Some(now.saturating_add(secs.max(0)));
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -333,7 +346,9 @@ impl Api {
     }
 
     pub async fn me(&self) -> Result<Me> {
-        Ok(self.get("/api/me").await?.json().await?)
+        let mut me: Me = self.get("/api/me").await?.json().await?;
+        me.tickets.localize(crate::hub::unix_now());
+        Ok(me)
     }
 
     // ---- 사전 다운로드 ----
@@ -527,4 +542,39 @@ async fn save(resp: reqwest::Response, dest: &Path) -> Result<String> {
     file.flush().await?;
     file.sync_all().await?;
     Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tickets;
+
+    fn tickets(next_refill_at: Option<i64>, next_refill_in: Option<i64>) -> Tickets {
+        Tickets {
+            available: 0,
+            max: 5,
+            refill_seconds: 60,
+            next_refill_at,
+            next_refill_in,
+        }
+    }
+
+    #[test]
+    fn localize_uses_remaining_seconds() {
+        // 서버 시계가 PC보다 9시간 앞서도 남은 시간은 서버가 계산한 42초다.
+        let now = 1_000_000;
+        let mut t = tickets(Some(now + 9 * 3600 + 42), Some(42));
+        t.localize(now);
+        assert_eq!(t.next_refill_at, Some(now + 42));
+    }
+
+    #[test]
+    fn localize_keeps_old_server_and_full() {
+        let mut old = tickets(Some(123), None);
+        old.localize(1_000_000);
+        assert_eq!(old.next_refill_at, Some(123));
+
+        let mut full = tickets(None, None);
+        full.localize(1_000_000);
+        assert_eq!(full.next_refill_at, None);
+    }
 }
