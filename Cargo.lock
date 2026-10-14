@@ -1233,7 +1233,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ebms-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "ebms-core",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "ebms-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1269,7 +1269,7 @@ dependencies = [
 
 [[package]]
 name = "ebms-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "ebms-vfs-fuse"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ebms-core",
  "fuser",
@@ -1305,7 +1305,7 @@ dependencies = [
 
 [[package]]
 name = "ebms-vfs-winfsp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ebms-core",
  "tokio",
