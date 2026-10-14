@@ -8,6 +8,10 @@ on:
         type: choice
         options: [stage, release]
         required: true
+      version:
+        description: 새 버전 (예 0.2.0, 비우면 현재 버전 유지)
+        type: string
+        required: false
 
 jobs:
   promote:
@@ -26,6 +30,42 @@ jobs:
           token: ${{ steps.app.outputs.token }}
 
       - name: Fast-forward 승격
+        env:
+          TARGET: ${{ inputs.target }}
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
         run: |
-          SRC=$([ "${{ inputs.target }}" = "stage" ] && echo develop || echo stage)
-          git push origin "origin/$SRC:refs/heads/${{ inputs.target }}"
+          set -euo pipefail
+          SRC=$([ "$TARGET" = "stage" ] && echo develop || echo stage)
+          git checkout -q -B promote "origin/$SRC"
+
+          VERSION="${VERSION#v}"
+          if [ -n "$VERSION" ]; then
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::버전 형식이 잘못됐습니다: $VERSION (예 0.2.0)"; exit 1
+            fi
+            if [ "$TARGET" = "release" ] && gh release view "v$VERSION" >/dev/null 2>&1; then
+              echo "::error::v$VERSION 릴리스가 이미 있습니다."; exit 1
+            fi
+            sed -i '/^\[workspace.package\]/,/^\[/s/^version *= *".*"/version = "'"$VERSION"'"/' Cargo.toml
+            # 워크스페이스 크레이트(ebms-*) 버전만 Cargo.lock에서 맞춘다
+            sed -i '/^name = "ebms-/{n;s/^version = ".*"/version = "'"$VERSION"'"/}' Cargo.lock
+            FILES="Cargo.toml Cargo.lock"
+            if ! git diff --quiet -- $FILES; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -q -m "버전 $VERSION" -- $FILES
+              # 승격 원본 브랜치에도 반영해 이후 fast-forward가 유지되게 한다
+              git push origin "HEAD:refs/heads/$SRC"
+            fi
+          fi
+
+          git push origin "HEAD:refs/heads/$TARGET"
+
+          # release 승격에서 stage에 올린 버전 커밋을 develop에도 병합
+          if [ "$SRC" != develop ] && ! git merge-base --is-ancestor HEAD origin/develop; then
+            git fetch -q origin develop
+            git checkout -q -B develop-sync origin/develop
+            git merge -q --no-edit promote
+            git push origin HEAD:refs/heads/develop
+          fi
