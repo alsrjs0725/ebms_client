@@ -65,11 +65,14 @@ async fn sync_charts(
     let remote = api.chart_hash().await?;
     let local = index.chunk_hashes(ChunkKind::Chart)?;
 
-    let todo = remote
+    // 클로저가 빌린 참조를 받으면 future가 `Send`로 증명되지 않아(앱의 `spawn`) 소유한 값으로 넘긴다.
+    let todo: Vec<(u32, String)> = remote
         .iter()
-        .filter(|&(id, sha)| !(local.get(id) == Some(sha) && paths.chart_chunk(*id, sha).exists()));
+        .filter(|&(id, sha)| !(local.get(id) == Some(sha) && paths.chart_chunk(*id, sha).exists()))
+        .map(|(&id, sha)| (id, sha.clone()))
+        .collect();
     let mut jobs = stream::iter(todo)
-        .map(|(&id, sha)| fetch_chunk(api, paths, Remote::Chart, id, sha.clone(), scan_chart_chunk))
+        .map(|(id, sha)| fetch_chunk(api, paths, Remote::Chart, id, sha, scan_chart_chunk))
         .buffer_unordered(CHUNK_CONCURRENCY);
     while let Some((id, fetched)) = jobs.next().await {
         let Some((sha, tmp, charts)) = fetched? else {
@@ -116,11 +119,14 @@ async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncRepo
         }
     }
 
-    let todo = remote
+    // 클로저가 빌린 참조를 받으면 future가 `Send`로 증명되지 않아(앱의 `spawn`) 소유한 값으로 넘긴다.
+    let todo: Vec<(u32, String)> = remote
         .iter()
-        .filter(|&(id, sha)| !(local.get(id) == Some(sha) && paths.pre_chunk(*id, sha).exists()));
+        .filter(|&(id, sha)| !(local.get(id) == Some(sha) && paths.pre_chunk(*id, sha).exists()))
+        .map(|(&id, sha)| (id, sha.clone()))
+        .collect();
     let mut jobs = stream::iter(todo)
-        .map(|(&id, sha)| fetch_chunk(api, paths, Remote::Pre, id, sha.clone(), scan_pre_chunk))
+        .map(|(id, sha)| fetch_chunk(api, paths, Remote::Pre, id, sha, scan_pre_chunk))
         .buffer_unordered(CHUNK_CONCURRENCY);
     while let Some((id, fetched)) = jobs.next().await {
         let Some((sha, tmp, files)) = fetched? else {
@@ -381,4 +387,11 @@ pub fn scan_pre_chunk(path: &Path, chunk_id: u32, chunk_sha256: &str) -> Result<
         });
     }
     Ok(out)
+}
+
+/// 앱은 동기화를 `spawn`으로 돌리므로 future가 `Send`여야 한다.
+#[allow(dead_code)]
+fn sync_all_is_send(api: &Api, paths: &Paths, index: &Index) {
+    fn is_send<T: Send>(_: T) {}
+    is_send(sync_all(api, paths, index));
 }
