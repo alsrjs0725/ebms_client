@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ebms_core::Error;
-use ebms_core::api::Me;
+use ebms_core::api::{DifficultyTable, Me};
 use ebms_core::hub::{LocalUsage, Server, SyncStatus};
 use serde::Serialize;
 use tauri::{AppHandle, State};
@@ -41,6 +41,8 @@ pub struct ServerView {
     usage: Option<LocalUsage>,
     /// 키체인을 못 써서 세션키를 평문 파일에 저장했음
     session_in_file: bool,
+    /// 사전 다운로드할 난이도표 id. None이면 전곡
+    pre_tables: Option<Vec<u32>>,
 }
 
 async fn view(server: Arc<Server>) -> ServerView {
@@ -84,6 +86,10 @@ async fn view(server: Arc<Server>) -> ServerView {
         sync: server.sync_status(),
         usage,
         session_in_file: api.has_session() && server.session_in_file(),
+        pre_tables: server.pre_tables().unwrap_or_else(|e| {
+            tracing::warn!(%e, "could not read pre download tables");
+            None
+        }),
     }
 }
 
@@ -151,6 +157,40 @@ pub fn open_account(state: State<'_, AppState>, id: String) -> CmdResult<()> {
 #[tauri::command]
 pub async fn sync_now(state: State<'_, AppState>, id: String) -> CmdResult<SyncStatus> {
     let server = state.hub.server(&id).map_err(err)?;
+    server.sync().await.map_err(err)?;
+    Ok(server.sync_status())
+}
+
+#[derive(Serialize)]
+pub struct PreTablesView {
+    /// 서버가 난이도표를 지원함. 아니면 전곡만 받을 수 있다.
+    available: bool,
+    tables: Vec<DifficultyTable>,
+    /// 고른 난이도표 id. None이면 전곡
+    selected: Option<Vec<u32>>,
+}
+
+/// 서버의 난이도표 목록과 지금 고른 사전 다운로드 범위.
+#[tauri::command]
+pub async fn pre_tables(state: State<'_, AppState>, id: String) -> CmdResult<PreTablesView> {
+    let server = state.hub.server(&id).map_err(err)?;
+    let tables = server.api().pre_tables().await.map_err(err)?;
+    Ok(PreTablesView {
+        available: tables.is_some(),
+        tables: tables.map(|t| t.tables).unwrap_or_default(),
+        selected: server.pre_tables().map_err(err)?,
+    })
+}
+
+/// 사전 다운로드 범위를 바꾸고 바로 동기화한다. `selected`가 None이면 전곡.
+#[tauri::command]
+pub async fn set_pre_tables(
+    state: State<'_, AppState>,
+    id: String,
+    selected: Option<Vec<u32>>,
+) -> CmdResult<SyncStatus> {
+    let server = state.hub.server(&id).map_err(err)?;
+    server.set_pre_tables(selected.as_deref()).map_err(err)?;
     server.sync().await.map_err(err)?;
     Ok(server.sync_status())
 }

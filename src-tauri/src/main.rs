@@ -80,6 +80,8 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             commands::logout,
             commands::open_account,
             commands::sync_now,
+            commands::pre_tables,
+            commands::set_pre_tables,
             commands::drive_info,
             commands::set_mount_point,
             commands::log_info,

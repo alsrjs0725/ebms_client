@@ -121,6 +121,44 @@ pub struct PreUsage {
     pub throttled: bool,
 }
 
+/// `GET /api/pre/tables`의 난이도표 하나.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DifficultyTable {
+    pub id: u32,
+    pub name: String,
+    pub symbol: String,
+    #[serde(default)]
+    pub url: String,
+    /// 표에 실린 차트 수
+    #[serde(default)]
+    pub charts: u32,
+    /// 그중 서버에 있는 차트 수
+    #[serde(default)]
+    pub matched_charts: u32,
+    /// 그 차트가 든 곡 수
+    #[serde(default)]
+    pub songs: u32,
+}
+
+/// `GET /api/pre/tables` 응답. 사전 청크마다 그 청크에 곡이 있는 난이도표 태그가 붙는다.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PreTables {
+    pub tables: Vec<DifficultyTable>,
+    /// 사전 청크 id → 난이도표 id들. 난이도표의 곡이 없는 청크는 없다.
+    pub chunks: BTreeMap<u32, Vec<u32>>,
+}
+
+impl PreTables {
+    /// 고른 난이도표 중 하나라도 태그로 붙은 사전 청크.
+    pub fn chunks_for(&self, tables: &[u32]) -> std::collections::BTreeSet<u32> {
+        self.chunks
+            .iter()
+            .filter(|(_, tags)| tags.iter().any(|t| tables.contains(t)))
+            .map(|(&id, _)| id)
+            .collect()
+    }
+}
+
 /// 서버 HTTP API 클라이언트. 세션키가 있으면 모든 요청에 `Authorization: Bearer`로 싣는다.
 pub struct Api {
     base: String,
@@ -306,6 +344,33 @@ impl Api {
 
     pub async fn pre_hash(&self) -> Result<BTreeMap<u32, String>> {
         self.hash_map("/api/pre/assethash").await
+    }
+
+    /// 난이도표와 사전 청크별 태그. 난이도표 API가 없는 이전 서버면 None.
+    pub async fn pre_tables(&self) -> Result<Option<PreTables>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            tables: Vec<DifficultyTable>,
+            chunks: BTreeMap<String, Vec<u32>>,
+        }
+        let raw: Raw = match self.get("/api/pre/tables").await {
+            Ok(resp) => resp.json().await?,
+            Err(Error::Status { status: 404, .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let chunks = raw
+            .chunks
+            .into_iter()
+            .map(|(k, v)| {
+                k.parse()
+                    .map(|k| (k, v))
+                    .map_err(|_| Error::Other(format!("bad chunk id {k:?} from /api/pre/tables")))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Some(PreTables {
+            tables: raw.tables,
+            chunks,
+        }))
     }
 
     pub async fn manifest_hash(&self) -> Result<BTreeMap<u32, String>> {
