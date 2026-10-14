@@ -137,12 +137,12 @@ impl Mount {
 
 #[cfg(target_os = "linux")]
 fn spawn(hub: &Hub, point: &Path) -> std::io::Result<Session> {
-    ebms_vfs_fuse::spawn_mount(hub.drive(), point, hub.config().players())
+    ebms_vfs_fuse::spawn_mount(hub.drive(), point, hub.players())
 }
 
 #[cfg(windows)]
 fn spawn(hub: &Hub, point: &Path) -> std::io::Result<Session> {
-    ebms_vfs_winfsp::spawn_mount(hub.drive(), point, hub.config().players(), hub.runtime())
+    ebms_vfs_winfsp::spawn_mount(hub.drive(), point, hub.players(), hub.runtime())
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

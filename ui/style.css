@@ -49,6 +49,9 @@ section > p.muted { margin: 6px 0; }
   color: var(--accent);
 }
 
+.players { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 6px; }
+.players li { display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--card); border-radius: 6px; padding: 6px 8px; }
+.players .path { flex: 1; font-size: 12px; overflow-wrap: anywhere; }
 .servers { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
 .server { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 12px; }
 .server .head { display: flex; flex-direction: column; gap: 2px; }

@@ -8,6 +8,7 @@ use ebms_core::api::{DifficultyTable, Me};
 use ebms_core::hub::{LocalUsage, Server, SyncStatus};
 use serde::Serialize;
 use tauri::State;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::AppState;
 use crate::mount::DriveInfo;
@@ -205,6 +206,64 @@ pub fn cache_limit_gb(state: State<'_, AppState>) -> u64 {
 pub async fn set_cache_limit_gb(state: State<'_, AppState>, gb: u64) -> CmdResult<u64> {
     state.hub.set_cache_limit_gb(gb).await.map_err(err)?;
     Ok(gb)
+}
+
+#[derive(Serialize)]
+pub struct PlayersView {
+    /// 이름으로 알아보는 기본 구동기
+    defaults: &'static [&'static str],
+    /// 사용자가 고른 실행 파일 (전체 경로)
+    custom: Vec<String>,
+}
+
+#[tauri::command]
+pub fn players(state: State<'_, AppState>) -> PlayersView {
+    PlayersView {
+        defaults: ebms_core::players::DEFAULT_PLAYERS,
+        custom: state.hub.config().custom_players,
+    }
+}
+
+/// 파일 선택 창에서 구동기 exe를 골라 추가한다. 고른 파일을 돌려주고, 취소하면 None.
+/// 마운트한 드라이브에 바로 적용된다.
+#[tauri::command]
+pub async fn add_custom_player(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+) -> CmdResult<Option<String>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_title("구동기 실행 파일 선택")
+        .set_parent(&window)
+        .add_filter("실행 파일", &["exe"])
+        .pick_file(move |file| {
+            let _ = tx.send(file);
+        });
+    let Some(file) = rx.await.map_err(err)? else {
+        return Ok(None);
+    };
+    let path = file.into_path().map_err(err)?;
+    let path = path.to_string_lossy().into_owned();
+    let mut result = Ok(true);
+    state
+        .hub
+        .update_config(|c| result = c.add_custom_player(&path))
+        .map_err(err)?;
+    result.map_err(err)?;
+    Ok(Some(path))
+}
+
+#[tauri::command]
+pub fn remove_custom_player(state: State<'_, AppState>, path: String) -> CmdResult<()> {
+    state
+        .hub
+        .update_config(|c| {
+            c.remove_custom_player(&path);
+        })
+        .map_err(err)?;
+    Ok(())
 }
 
 #[tauri::command]

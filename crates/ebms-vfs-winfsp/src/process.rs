@@ -1,8 +1,7 @@
 //! 파일을 연 프로세스. 곡 다운로드가 필요할 때만 실행 파일과 명령줄을 읽는다.
 
-use std::sync::Arc;
-
 use ebms_core::fs::Caller;
+use ebms_core::players::Players;
 use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, UNICODE_STRING};
 use windows::Win32::System::Threading::{
@@ -16,11 +15,11 @@ const PROCESS_COMMAND_LINE_INFORMATION: PROCESSINFOCLASS = PROCESSINFOCLASS(60);
 /// 다운로드가 끝난 뒤 런타임 스레드에서도 쓰므로 데이터를 소유한다.
 pub(crate) struct ProcessCaller {
     pid: u32,
-    players: Arc<[String]>,
+    players: Players,
 }
 
 impl ProcessCaller {
-    pub(crate) fn new(pid: u32, players: Arc<[String]>) -> Self {
+    pub(crate) fn new(pid: u32, players: Players) -> Self {
         Self { pid, players }
     }
 
@@ -44,7 +43,7 @@ impl Caller for ProcessCaller {
 
     fn is_player(&self) -> bool {
         let (exe, args) = self.info();
-        ebms_core::players::is_player(&self.players, exe.as_deref(), &args)
+        self.players.is_player(exe.as_deref(), &args)
     }
 }
 
