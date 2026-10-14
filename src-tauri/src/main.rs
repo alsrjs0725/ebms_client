@@ -2,6 +2,7 @@
 //!
 //! 등록된 서버를 모두 동기화하고 가상 드라이브를 띄운 채 상주한다. 알림·트레이 아이콘은 없다.
 //! 켜질 때 서버 공지 중 확인하지 않은 것이 있으면 공지 창을 띄운다([`notices`]).
+//! 켜질 때 새 릴리스가 있으면 업데이트할지 묻는다([`update`]).
 //! 설정 창은 앱을 실행할 때 열리고, 닫으면 웹뷰를 해제한다. 이미 떠 있을 때 다시 실행해도 열린다.
 //! 자동 시작은 `--background`로 실행해 창 없이 뜬다(서버가 하나도 없으면 그래도 연다).
 //! 로그는 콘솔과 앱 데이터 폴더의 `logs/`에 함께 남긴다([`logging`]).
@@ -11,6 +12,7 @@ mod commands;
 mod logging;
 mod mount;
 mod notices;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +48,8 @@ fn main() {
 }
 
 fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    // 단일 인스턴스 확인 전에 업데이트 전 프로세스가 끝나기를 기다린다.
+    update::finish_previous();
     // 코어(다운로드, 가상 FS)와 Tauri가 같은 tokio 런타임을 쓴다.
     let rt = Box::leak(Box::new(tokio::runtime::Runtime::new()?));
     tauri::async_runtime::set(rt.handle().clone());
@@ -71,6 +75,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             hub: hub.clone(),
             log_dir,
         })
+        .manage(update::Update::default())
         .invoke_handler(tauri::generate_handler![
             commands::list_servers,
             commands::add_server,
@@ -91,6 +96,9 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             commands::quit,
             notices::pending_notices,
             notices::ack_notices,
+            update::update_info,
+            update::dismiss_update,
+            update::apply_update,
         ])
         .setup(move |app| {
             let state = app.state::<AppState>();
@@ -107,6 +115,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
                 open_settings(app.handle());
             }
             notices::check_on_start(app.handle(), state.hub.clone());
+            update::check_on_start(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())?;
