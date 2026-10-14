@@ -36,6 +36,16 @@
     </section>
 
     <section>
+      <h2>캐시</h2>
+      <form id="cache-form" class="add">
+        <input id="cache-limit" type="number" min="1" step="1" required aria-label="캐시 용량 (GB)">
+        <span class="muted">GB</span>
+        <button type="submit">용량 변경</button>
+      </form>
+      <p class="muted">서버마다 이 용량까지 받은 키음·BGA를 보관합니다. 넘으면 오래 안 쓴 곡부터 지웁니다.</p>
+    </section>
+
+    <section>
       <h2>로그</h2>
       <p id="log-path" class="muted"></p>
       <div class="actions">

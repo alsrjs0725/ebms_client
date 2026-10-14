@@ -123,6 +123,7 @@ impl App {
     fn client(&self, server: &ServerEntry) -> anyhow::Result<Client> {
         self.dir.prepare_server_dir(server)?;
         let mut opts = Options::new(&server.url, self.dir.server_dir(server));
+        opts.cache_limit = self.config.cache_limit();
         opts.session = self.session(server).load()?;
         Ok(Client::open(&opts)?)
     }

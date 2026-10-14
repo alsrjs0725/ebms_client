@@ -195,6 +195,18 @@ pub async fn set_pre_tables(
     Ok(server.sync_status())
 }
 
+/// 서버별 캐시 한도(GB).
+#[tauri::command]
+pub fn cache_limit_gb(state: State<'_, AppState>) -> u64 {
+    state.hub.config().cache_limit_gb()
+}
+
+#[tauri::command]
+pub async fn set_cache_limit_gb(state: State<'_, AppState>, gb: u64) -> CmdResult<u64> {
+    state.hub.set_cache_limit_gb(gb).await.map_err(err)?;
+    Ok(gb)
+}
+
 #[tauri::command]
 pub fn drive_info(state: State<'_, AppState>) -> DriveInfo {
     state.mount.info()

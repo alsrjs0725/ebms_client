@@ -80,6 +80,7 @@ button.danger { background: transparent; color: var(--danger); border-color: var
 button:disabled { opacity: .5; cursor: default; }
 
 .add { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.add > .muted { align-self: center; }
 .add input {
   flex: 1 1 160px;
   min-width: 0;

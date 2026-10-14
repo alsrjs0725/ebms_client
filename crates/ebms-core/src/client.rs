@@ -42,7 +42,7 @@ impl Options {
         Self {
             server: server.into(),
             data_dir: data_dir.into(),
-            cache_limit: 20 << 30,
+            cache_limit: crate::config::DEFAULT_CACHE_LIMIT_GB << 30,
             session: None,
         }
     }

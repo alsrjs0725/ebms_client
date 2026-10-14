@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,7 +20,7 @@ pub struct Cache {
     root: PathBuf,
     tmp: PathBuf,
     index: Arc<Index>,
-    limit: u64,
+    limit: AtomicU64,
     touched: Mutex<HashMap<(u32, String), i64>>,
     evict_lock: Mutex<()>,
 }
@@ -30,7 +31,7 @@ impl Cache {
             root,
             tmp,
             index,
-            limit,
+            limit: AtomicU64::new(limit),
             touched: Mutex::new(HashMap::new()),
             evict_lock: Mutex::new(()),
         }
@@ -213,7 +214,7 @@ impl Cache {
 
     /// 한도를 넘으면 오래 안 쓴 곡부터 지운다.
     pub fn evict(&self) -> Result<u64> {
-        self.evict_to(self.limit)
+        self.evict_to(self.limit())
     }
 
     /// "항상 보관"이 아닌 곡을 모두 지운다. 읽는 중이라 못 지운 파일은 남긴다.
@@ -264,7 +265,12 @@ impl Cache {
     }
 
     pub fn limit(&self) -> u64 {
-        self.limit
+        self.limit.load(Ordering::Relaxed)
+    }
+
+    /// 한도를 바꾼다. 줄였으면 [`Self::evict`]로 넘는 만큼 지운다.
+    pub fn set_limit(&self, limit: u64) {
+        self.limit.store(limit, Ordering::Relaxed);
     }
 
     pub fn total(&self) -> Result<u64> {
