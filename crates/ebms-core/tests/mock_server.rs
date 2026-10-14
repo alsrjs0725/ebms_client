@@ -1205,7 +1205,7 @@ fn several_servers_show_as_top_level_folders() {
     // 캐시 사용량을 보여주고 비울 수 있다.
     let usage = a.usage().unwrap();
     assert!(usage.cache_bytes > 0);
-    assert_eq!(usage.cache_limit, 20 << 30);
+    assert_eq!(usage.cache_limit, 5 << 30);
     assert!(
         usage.total_bytes > usage.cache_bytes,
         "index and charts count too"

@@ -164,7 +164,8 @@ impl Hub {
     }
 
     fn open_server(&self, entry: &ServerEntry) -> Result<Arc<Server>> {
-        open_server(&self.dir, self.use_keyring, &self.rt, entry)
+        let cache_limit = self.config().cache_limit();
+        open_server(&self.dir, self.use_keyring, &self.rt, entry, cache_limit)
     }
 
     fn insert(&self, server: Arc<Server>) {
@@ -203,6 +204,28 @@ impl Hub {
         self.dir.save_config(&config)?;
         state.config = config.clone();
         Ok(config)
+    }
+
+    /// 서버별 캐시 한도(GB)를 바꿔 저장하고, 줄었으면 넘는 만큼 오래 안 쓴 곡부터 지운다.
+    pub async fn set_cache_limit_gb(&self, gb: u64) -> Result<()> {
+        if gb == 0 {
+            return Err(Error::Config("cache limit must be at least 1 GB".into()));
+        }
+        let limit = self
+            .update_config(|c| c.cache_limit_gb = Some(gb))?
+            .cache_limit();
+        for server in self.servers() {
+            let cache = server.client.fetcher.cache().clone();
+            cache.set_limit(limit);
+            let evicted = tokio::task::spawn_blocking(move || cache.evict())
+                .await
+                .map_err(|e| Error::Other(e.to_string()))
+                .and_then(|r| r);
+            if let Err(e) = evicted {
+                warn!(server = %server.entry.name, %e, "cache eviction failed");
+            }
+        }
+        Ok(())
     }
 
     /// 설정 순서대로.
@@ -246,9 +269,12 @@ impl Hub {
         let server = {
             let (dir, rt, entry) = (self.dir.clone(), self.rt.clone(), entry.clone());
             let use_keyring = self.use_keyring;
-            tokio::task::spawn_blocking(move || open_server(&dir, use_keyring, &rt, &entry))
-                .await
-                .map_err(|e| Error::Other(e.to_string()))??
+            let cache_limit = config.cache_limit();
+            tokio::task::spawn_blocking(move || {
+                open_server(&dir, use_keyring, &rt, &entry, cache_limit)
+            })
+            .await
+            .map_err(|e| Error::Other(e.to_string()))??
         };
         self.update_config(|c| c.servers.push(entry.clone()))?;
         self.insert(server.clone());
@@ -340,12 +366,14 @@ fn open_server(
     use_keyring: bool,
     rt: &Handle,
     entry: &ServerEntry,
+    cache_limit: u64,
 ) -> Result<Arc<Server>> {
     dir.prepare_server_dir(entry)?;
     if entry.is_insecure() {
         warn!(server = %entry.name, url = %entry.url, "unencrypted http server, session key is sent in plain text");
     }
     let mut opts = Options::new(&entry.url, dir.server_dir(entry));
+    opts.cache_limit = cache_limit;
     opts.session = SessionStore::new(&entry.url, &dir.server_dir(entry), use_keyring).load()?;
     let client = Client::open(&opts)?;
     let fs = Arc::new(client.fs(rt.clone())?);

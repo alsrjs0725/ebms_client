@@ -271,6 +271,7 @@ async function refresh() {
   $("servers").replaceChildren(...servers.map(renderServer));
   $("empty").hidden = servers.length > 0;
   await refreshDrive();
+  await refreshCacheLimit();
 }
 
 async function refreshDrive() {
@@ -311,6 +312,22 @@ $("drive-form").addEventListener("submit", (ev) => {
     await invoke("set_mount_point", { path: $("drive-path").value });
     $("drive-path").blur();
     await refreshDrive();
+  });
+});
+
+async function refreshCacheLimit() {
+  const input = $("cache-limit");
+  if (document.activeElement !== input) input.value = await invoke("cache_limit_gb");
+}
+
+$("cache-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  run(ev.submitter, async () => {
+    const gb = Number($("cache-limit").value);
+    await invoke("set_cache_limit_gb", { gb });
+    $("cache-limit").blur();
+    showMessage(`캐시 용량을 ${gb} GB로 바꿨습니다.`, "info");
+    await refresh();
   });
 });
 
