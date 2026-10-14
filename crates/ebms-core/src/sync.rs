@@ -6,11 +6,12 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use futures_util::{StreamExt, stream};
 use tracing::{info, warn};
 
 use crate::api::Api;
 use crate::index::{ChartRow, ChunkKind, Index, PreRow};
-use crate::paths::Paths;
+use crate::paths::{Paths, TmpFile};
 use crate::{Error, Result};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -64,14 +65,17 @@ async fn sync_charts(
     let remote = api.chart_hash().await?;
     let local = index.chunk_hashes(ChunkKind::Chart)?;
 
-    for (&id, sha) in &remote {
-        if local.get(&id) == Some(sha) && paths.chart_chunk(id, sha).exists() {
-            continue;
-        }
-        let tmp = paths.tmp_file(&format!("chart_chunk_{id:05}"));
-        let Some(sha) =
-            download_stable_chunk(api, Remote::Chart, id, sha.clone(), tmp.path()).await?
-        else {
+    // 클로저가 빌린 참조를 받으면 future가 `Send`로 증명되지 않아(앱의 `spawn`) 소유한 값으로 넘긴다.
+    let todo: Vec<(u32, String)> = remote
+        .iter()
+        .filter(|&(id, sha)| !(local.get(id) == Some(sha) && paths.chart_chunk(*id, sha).exists()))
+        .map(|(&id, sha)| (id, sha.clone()))
+        .collect();
+    let mut jobs = stream::iter(todo)
+        .map(|(id, sha)| fetch_chunk(api, paths, Remote::Chart, id, sha, scan_chart_chunk))
+        .buffer_unordered(CHUNK_CONCURRENCY);
+    while let Some((id, fetched)) = jobs.next().await {
+        let Some((sha, tmp, charts)) = fetched? else {
             warn!(
                 chunk_id = id,
                 "chart chunk kept changing on server, skipped"
@@ -83,19 +87,14 @@ async fn sync_charts(
         if local.get(&id) == Some(&sha) && dest.exists() {
             continue;
         }
-        let charts = {
-            let tmp = tmp.path().to_path_buf();
-            let sha = sha.clone();
-            tokio::task::spawn_blocking(move || scan_chart_chunk(&tmp, id, &sha))
-                .await
-                .map_err(|e| Error::Other(e.to_string()))??
-        };
         // 새 판은 해시가 든 다른 이름으로 둔다. 옛 트리는 옛 파일을, 새 인덱스는 새 파일을 읽고
         // 옛 파일은 트리를 다시 만든 뒤 다음 정리([`tidy_chunks`])에서 지운다.
         tmp.persist(&dest)?;
         index.replace_chart_chunk(id, &sha, &charts)?;
         report.chart_chunks_updated.push(id);
     }
+    report.chart_chunks_updated.sort_unstable();
+    report.chart_chunks_skipped.sort_unstable();
 
     // 파일은 다음 정리에서 지운다. 지금 트리가 아직 읽을 수 있다.
     for &id in local.keys().filter(|id| !remote.contains_key(id)) {
@@ -120,14 +119,17 @@ async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncRepo
         }
     }
 
-    for (&id, sha) in &remote {
-        if local.get(&id) == Some(sha) && paths.pre_chunk(id, sha).exists() {
-            continue;
-        }
-        let tmp = paths.tmp_file(&format!("pre_chunk_{id:05}"));
-        let Some(sha) =
-            download_stable_chunk(api, Remote::Pre, id, sha.clone(), tmp.path()).await?
-        else {
+    // 클로저가 빌린 참조를 받으면 future가 `Send`로 증명되지 않아(앱의 `spawn`) 소유한 값으로 넘긴다.
+    let todo: Vec<(u32, String)> = remote
+        .iter()
+        .filter(|&(id, sha)| !(local.get(id) == Some(sha) && paths.pre_chunk(*id, sha).exists()))
+        .map(|(&id, sha)| (id, sha.clone()))
+        .collect();
+    let mut jobs = stream::iter(todo)
+        .map(|(id, sha)| fetch_chunk(api, paths, Remote::Pre, id, sha, scan_pre_chunk))
+        .buffer_unordered(CHUNK_CONCURRENCY);
+    while let Some((id, fetched)) = jobs.next().await {
+        let Some((sha, tmp, files)) = fetched? else {
             warn!(chunk_id = id, "pre chunk kept changing on server, skipped");
             report.pre_chunks_skipped.push(id);
             continue;
@@ -136,18 +138,13 @@ async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncRepo
         if local.get(&id) == Some(&sha) && dest.exists() {
             continue;
         }
-        let files = {
-            let tmp = tmp.path().to_path_buf();
-            let sha = sha.clone();
-            tokio::task::spawn_blocking(move || scan_pre_chunk(&tmp, id, &sha))
-                .await
-                .map_err(|e| Error::Other(e.to_string()))??
-        };
         // 차트 청크와 같이 해시가 든 새 이름으로 둔다.
         tmp.persist(&dest)?;
         index.replace_pre_chunk(id, &sha, &files)?;
         report.pre_chunks_updated.push(id);
     }
+    report.pre_chunks_updated.sort_unstable();
+    report.pre_chunks_skipped.sort_unstable();
 
     for &id in local.keys().filter(|id| !remote.contains_key(id)) {
         index.remove_pre_chunk(id)?;
@@ -255,6 +252,44 @@ async fn download_stable_chunk(
 
 const CHUNK_ATTEMPTS: usize = 3;
 
+/// 청크를 동시에 받는 개수. 청크가 작아져(사전 8곡·차트 100개) 하나씩 받으면 왕복 지연이 쌓인다.
+const CHUNK_CONCURRENCY: usize = 4;
+
+/// 청크 하나를 임시 파일로 받아 스캔한다. 여러 개를 동시에 돌리고, 결과의 반영(옮기기·인덱스)은
+/// 부르는 쪽이 하나씩 한다. 서버에서 계속 바뀌어 건너뛰면 `None`.
+async fn fetch_chunk<T: Send + 'static>(
+    api: &Api,
+    paths: &Paths,
+    remote: Remote,
+    id: u32,
+    sha: String,
+    scan: fn(&Path, u32, &str) -> Result<T>,
+) -> (u32, Result<Option<(String, TmpFile, T)>>) {
+    let name = match remote {
+        Remote::Chart => format!("chart_chunk_{id:05}"),
+        Remote::Pre => format!("pre_chunk_{id:05}"),
+    };
+    let tmp = paths.tmp_file(&name);
+    let result = async {
+        let Some(sha) = download_stable_chunk(api, remote, id, sha, tmp.path()).await? else {
+            return Ok(None);
+        };
+        let rows = {
+            let tmp = tmp.path().to_path_buf();
+            let sha = sha.clone();
+            tokio::task::spawn_blocking(move || scan(&tmp, id, &sha))
+                .await
+                .map_err(|e| Error::Other(e.to_string()))??
+        };
+        Ok(Some((sha, rows)))
+    }
+    .await;
+    (
+        id,
+        result.map(|got| got.map(|(sha, rows)| (sha, tmp, rows))),
+    )
+}
+
 async fn sync_manifests(api: &Api, index: &Index, report: &mut SyncReport) -> Result<()> {
     let remote = api.manifest_hash().await?;
     let local = index.chunk_hashes(ChunkKind::Manifest)?;
@@ -352,4 +387,11 @@ pub fn scan_pre_chunk(path: &Path, chunk_id: u32, chunk_sha256: &str) -> Result<
         });
     }
     Ok(out)
+}
+
+/// 앱은 동기화를 `spawn`으로 돌리므로 future가 `Send`여야 한다.
+#[allow(dead_code)]
+fn sync_all_is_send(api: &Api, paths: &Paths, index: &Index) {
+    fn is_send<T: Send>(_: T) {}
+    is_send(sync_all(api, paths, index));
 }
