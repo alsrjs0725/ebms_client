@@ -341,8 +341,6 @@ async function showLogPath() {
 
 $("open-logs").addEventListener("click", () => run($("open-logs"), () => invoke("open_log_dir")));
 
-confirmClick($("quit"), "한 번 더 누르면 종료 (가상 드라이브도 내려감)", () => invoke("quit"));
-
 refresh().catch((e) => showMessage(String(e)));
 showLogPath().catch(() => {});
 setInterval(() => {

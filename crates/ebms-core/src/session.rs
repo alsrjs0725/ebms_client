@@ -3,8 +3,7 @@
 //! OS 키체인(Windows 자격 증명 관리자, macOS 키체인, Linux Secret Service)에 서버 주소별로 둔다.
 //! 키체인을 쓸 수 없으면 서버 데이터 폴더의 `session` 파일(권한 600)에 두고 `warn!`을 남긴다.
 //! 설정 창은 [`SessionStore::in_file`]로 이를 알린다.
-//! Windows는 파일 ACL을 따로 정하지 않는다. 기본 위치(`%APPDATA%\ebms`)는 사용자 프로필의 ACL을
-//! 물려받아 다른 일반 사용자는 읽지 못하지만, 데이터 폴더를 다른 곳으로 지정하면 그 폴더 권한을 따른다.
+//! Windows는 파일 ACL을 따로 정하지 않고 데이터 폴더(기본은 실행 파일 옆 `data`)의 권한을 따른다.
 //!
 //! 키체인 호출은 블로킹이므로 tokio 런타임 밖(또는 `spawn_blocking`)에서 부른다.
 
@@ -15,7 +14,7 @@ use tracing::{debug, warn};
 use crate::Result;
 
 const KEYRING_SERVICE: &str = "ebms";
-const SESSION_FILE: &str = "session";
+pub(crate) const SESSION_FILE: &str = "session";
 
 pub struct SessionStore {
     url: String,

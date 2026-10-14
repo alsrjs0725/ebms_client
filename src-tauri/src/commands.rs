@@ -7,7 +7,7 @@ use ebms_core::Error;
 use ebms_core::api::{DifficultyTable, Me};
 use ebms_core::hub::{LocalUsage, Server, SyncStatus};
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::State;
 
 use crate::AppState;
 use crate::mount::DriveInfo;
@@ -235,9 +235,4 @@ pub fn open_log_dir(state: State<'_, AppState>) -> CmdResult<()> {
         .as_ref()
         .ok_or("파일 로그를 쓰지 않고 있습니다")?;
     open::that_detached(dir).map_err(err)
-}
-
-#[tauri::command]
-pub fn quit(app: AppHandle) {
-    app.exit(0);
 }

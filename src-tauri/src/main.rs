@@ -1,9 +1,10 @@
-//! 상주 앱과 설정 창.
+//! 앱과 설정 창.
 //!
-//! 등록된 서버를 모두 동기화하고 가상 드라이브를 띄운 채 상주한다. 알림·트레이 아이콘은 없다.
+//! 설정 창이 떠 있는 동안만 돈다. 등록된 서버를 모두 동기화하고 가상 드라이브를 띄우며,
+//! 설정 창을 닫으면(X) 가상 드라이브를 내리고 프로세스까지 끝난다. 상주·트레이·자동 시작은 없다.
 //! 켜질 때 서버 공지 중 확인하지 않은 것이 있으면 공지 창을 띄운다([`notices`]).
-//! 설정 창은 앱을 실행할 때 열리고, 닫으면 웹뷰를 해제한다. 이미 떠 있을 때 다시 실행해도 열린다.
-//! 자동 시작은 `--background`로 실행해 창 없이 뜬다(서버가 하나도 없으면 그래도 연다).
+//! 이미 떠 있을 때 다시 실행하면 떠 있는 설정 창을 앞으로 가져온다.
+//! 앱 데이터는 실행 파일 옆 `data` 폴더에 둔다([`AppDir::default_root`]).
 //! 로그는 콘솔과 앱 데이터 폴더의 `logs/`에 함께 남긴다([`logging`]).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use ebms_core::config::AppDir;
 use ebms_core::hub::Hub;
-use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 /// 자동 동기화 간격
 const SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
@@ -33,11 +34,24 @@ pub struct AppState {
 }
 
 fn main() {
-    let root = match std::env::var_os("EBMS_DATA") {
-        Some(d) => Some(PathBuf::from(d)),
-        None => AppDir::default_root(),
+    let (root, migrated) = match std::env::var_os("EBMS_DATA") {
+        Some(d) => (Some(PathBuf::from(d)), Ok(false)),
+        None => {
+            let root = AppDir::default_root();
+            let migrated = match (&root, AppDir::legacy_root()) {
+                (Some(root), Some(old)) => AppDir::new(root).migrate_from(&old),
+                _ => Ok(false),
+            };
+            (root, migrated)
+        }
     };
+    // 옮긴 뒤에 로그를 연다. 로그 폴더가 먼저 생기면 폴더째 옮기지 못한다.
     let log_dir = logging::init(root.as_deref());
+    match migrated {
+        Ok(true) => tracing::info!(?root, "moved app data from the old location"),
+        Ok(false) => {}
+        Err(e) => tracing::warn!(%e, "could not move app data from the old location"),
+    }
 
     if let Err(e) = run(root, log_dir) {
         tracing::error!("{e}");
@@ -57,9 +71,6 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
         use_keyring,
         rt.handle().clone(),
     )?);
-    let show_settings =
-        hub.config().servers.is_empty() || !std::env::args().skip(1).any(|a| a == "--background");
-
     let app = tauri::Builder::default()
         // 이미 떠 있으면 새로 실행한 쪽은 끝나고, 떠 있는 앱이 설정 창을 연다.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -88,7 +99,6 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             commands::set_mount_point,
             commands::log_info,
             commands::open_log_dir,
-            commands::quit,
             notices::pending_notices,
             notices::ack_notices,
         ])
@@ -103,19 +113,22 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
                     hub.sync_all().await;
                 }
             });
-            if show_settings {
-                open_settings(app.handle());
-            }
+            build_settings(app.handle())?;
             notices::check_on_start(app.handle(), state.hub.clone());
             Ok(())
         })
+        // 설정 창을 닫으면 앱을 끝낸다. 가상 드라이브는 아래 `RunEvent::Exit`에서 내린다.
+        .on_window_event(|window, event| {
+            if window.label() == SETTINGS && matches!(event, WindowEvent::Destroyed) {
+                window.app_handle().exit(0);
+            }
+        })
         .build(tauri::generate_context!())?;
 
-    app.run(|app, event| match event {
-        // 설정 창을 닫아도 앱은 계속 돈다. 종료는 설정 창의 "EBMS 종료"로만.
-        RunEvent::ExitRequested { api, code, .. } if code.is_none() => api.prevent_exit(),
-        RunEvent::Exit => app.state::<AppState>().mount.stop(),
-        _ => {}
+    app.run(|app, event| {
+        if let RunEvent::Exit = event {
+            app.state::<AppState>().mount.stop();
+        }
     });
     Ok(())
 }
@@ -127,12 +140,16 @@ pub fn open_settings(app: &AppHandle) {
         let _ = window.set_focus();
         return;
     }
-    let built = WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App("index.html".into()))
+    if let Err(e) = build_settings(app) {
+        tracing::warn!(%e, "could not open settings window");
+    }
+}
+
+fn build_settings(app: &AppHandle) -> tauri::Result<()> {
+    WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App("index.html".into()))
         .title("EBMS 설정")
         .inner_size(560.0, 720.0)
         .min_inner_size(420.0, 480.0)
-        .build();
-    if let Err(e) = built {
-        tracing::warn!(%e, "could not open settings window");
-    }
+        .build()
+        .map(|_| ())
 }
