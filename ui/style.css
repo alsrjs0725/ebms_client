@@ -94,3 +94,12 @@ button:disabled { opacity: .5; cursor: default; }
 footer { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; }
 
 .notice .body { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.pre-scope { margin: 2px 0 0; font-size: 12px; }
+.pre-dialog { border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); max-width: 520px; width: calc(100% - 32px); }
+.pre-dialog::backdrop { background: rgb(0 0 0 / .4); }
+.pre-dialog h2 { margin-top: 0; }
+.choice { display: block; margin: 6px 0; }
+.pre-list { list-style: none; margin: 4px 0 0 22px; padding: 0; max-height: 280px; overflow-y: auto; }
+.pre-list li { margin: 2px 0; }
+.pre-list .muted { font-size: 12px; }

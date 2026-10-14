@@ -48,6 +48,21 @@
     </footer>
   </main>
 
+  <dialog id="pre-dialog" class="pre-dialog">
+    <form id="pre-form" method="dialog">
+      <h2 id="pre-title">사전 다운로드 범위</h2>
+      <p class="muted">동기화 때 배너·프리뷰 등을 미리 받을 곡입니다. 고르지 않은 곡도 목록에는 모두 보이고, 사전 파일은 읽을 때 하나씩 받습니다.</p>
+      <label class="choice"><input type="radio" name="scope" value="all"> 전곡</label>
+      <label class="choice"><input type="radio" name="scope" value="tables"> 고른 난이도표의 곡만</label>
+      <ul id="pre-list" class="pre-list"></ul>
+      <p id="pre-empty" class="muted" hidden></p>
+      <div class="actions">
+        <button id="pre-save" type="submit" value="save">저장하고 동기화</button>
+        <button type="submit" value="cancel" class="secondary" formnovalidate>취소</button>
+      </div>
+    </form>
+  </dialog>
+
   <template id="server-template">
     <li class="server">
       <div class="head">
@@ -61,12 +76,14 @@
       <dl class="account"></dl>
       <p class="session-file warning" hidden>키체인을 쓸 수 없어 세션키를 파일에 저장했습니다. 공용 PC라면 다 쓴 뒤 로그아웃하세요.</p>
       <p class="sync muted"></p>
+      <p class="pre-scope muted"></p>
       <p class="usage muted"></p>
       <div class="actions">
         <button class="login">로그인</button>
         <button class="logout secondary">로그아웃</button>
         <button class="account-link secondary">다른 계정 연결</button>
         <button class="sync-now secondary">지금 동기화</button>
+        <button class="pre-tables secondary">사전 다운로드 범위</button>
         <button class="clear-cache secondary">캐시 비우기</button>
         <button class="remove danger">삭제</button>
         <button class="remove-purge danger">삭제 + 로컬 데이터 지우기</button>

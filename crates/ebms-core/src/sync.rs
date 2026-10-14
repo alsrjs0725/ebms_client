@@ -106,8 +106,19 @@ async fn sync_charts(
 }
 
 async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncReport) -> Result<()> {
-    let remote = api.pre_hash().await?;
+    let mut remote = api.pre_hash().await?;
     let local = index.chunk_hashes(ChunkKind::Pre)?;
+    // 난이도표를 골랐으면 그 표의 태그가 붙은 청크만 받고, 나머지는 로컬에서도 뺀다.
+    // 빠진 곡의 사전 파일은 읽을 때 하나씩 받는다.
+    if let Some(selected) = index.pre_tables()? {
+        match api.pre_tables().await? {
+            Some(tables) => {
+                let wanted = tables.chunks_for(&selected);
+                remote.retain(|id, _| wanted.contains(id));
+            }
+            None => warn!("server has no difficulty tables, syncing every pre chunk"),
+        }
+    }
 
     for (&id, sha) in &remote {
         if local.get(&id) == Some(sha) && paths.pre_chunk(id, sha).exists() {

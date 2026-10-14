@@ -53,6 +53,8 @@ struct Server {
     play_cuts: usize,
     /// 켜 두면 청크 본문을 해시 목록과 다르게 망가뜨려 보낸다.
     corrupt_chart: bool,
+    /// `/api/pre/tables` 응답. 없으면 404(난이도표가 없는 이전 서버).
+    tables: Option<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -213,6 +215,13 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                 s.authorized(&headers)?;
                 s.counters.pre_hash.fetch_add(1, Ordering::SeqCst);
                 Ok::<_, StatusCode>(axum::Json(hashes(&s.server().pre_chunks)))
+            }),
+        )
+        .route(
+            "/api/pre/tables",
+            get(|State(s): State<AppState>, headers: HeaderMap| async move {
+                s.authorized(&headers)?;
+                s.server().tables.clone().map(axum::Json).ok_or(StatusCode::NOT_FOUND)
             }),
         )
         .route(
@@ -1325,4 +1334,75 @@ fn old_server_has_no_pre_chunks() {
     let report = env.rt.block_on(env.client.sync()).unwrap();
     assert!(report.pre_chunks_updated.is_empty());
     assert_eq!(env.state.counters.pre_hash.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn selected_difficulty_tables_sync_only_tagged_pre_chunks() {
+    let env = setup_with_pre_chunk();
+    {
+        let mut server = env.state.server();
+        server
+            .pre_chunks
+            .insert(1, pre_chunk(40, &[("banner.png", b"other")]));
+        server.tables = Some(json!({
+            "tables": [
+                {"id": 1, "name": "Insane", "symbol": "★", "url": "https://t.example/", "charts": 10,
+                 "matched_charts": 1, "songs": 1, "fetched_at": 1},
+                {"id": 2, "name": "Normal", "symbol": "☆", "url": "https://t.example/n", "charts": 5,
+                 "matched_charts": 1, "songs": 1, "fetched_at": 1},
+            ],
+            "chunks": {"0": [1], "1": [2]},
+        }));
+    }
+    let tables = env
+        .rt
+        .block_on(env.client.api.pre_tables())
+        .unwrap()
+        .unwrap();
+    assert_eq!(tables.tables.len(), 2);
+    assert_eq!(
+        tables.chunks_for(&[1, 2]).into_iter().collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+
+    let index = &env.client.index;
+    assert_eq!(index.pre_tables().unwrap(), None);
+    index.set_pre_tables(Some(&[2])).unwrap();
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.pre_chunks_updated, vec![1]);
+    assert!(index.pre_files(1).unwrap().is_empty());
+    assert_eq!(index.pre_files(40).unwrap().len(), 1);
+
+    // 표를 바꾸면 새 표의 청크를 받고 빠진 청크는 로컬에서도 뺀다.
+    index.set_pre_tables(Some(&[1])).unwrap();
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.pre_chunks_updated, vec![0]);
+    assert_eq!(report.pre_chunks_removed, vec![1]);
+    assert_eq!(index.pre_files(1).unwrap().len(), 2);
+    assert!(index.pre_files(40).unwrap().is_empty());
+
+    // 빠진 곡의 사전 파일은 읽을 때 하나씩 받는다.
+    index.set_pre_tables(Some(&[2])).unwrap();
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    assert_eq!(
+        read_all(&fs, &format!("{SONG}/banner.png")).unwrap(),
+        env.want("banner.png")
+    );
+    assert_eq!(env.state.counters.pre_file.load(Ordering::SeqCst), 1);
+
+    // 전곡으로 돌리면 모두 받는다.
+    index.set_pre_tables(None).unwrap();
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.pre_chunks_updated, vec![0]);
+    assert_eq!(env.state.counters.pre_chunk.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn server_without_difficulty_tables_syncs_every_pre_chunk() {
+    let env = setup_with_pre_chunk();
+    assert_eq!(env.rt.block_on(env.client.api.pre_tables()).unwrap(), None);
+    env.client.index.set_pre_tables(Some(&[1])).unwrap();
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.pre_chunks_updated, vec![0]);
 }

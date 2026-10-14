@@ -16,6 +16,8 @@ const INSECURE_TEXT = "암호화되지 않은 http 주소입니다. 세션키가
 
 /** 진행 중인 로그인 (서버 id) */
 const loggingIn = new Set();
+/** 사전 다운로드 범위 창에서 고르는 중인 서버 */
+let preServer = null;
 
 function showMessage(text, kind = "error") {
   const el = $("message");
@@ -121,6 +123,12 @@ function renderServer(s) {
     sync.textContent = `마지막 동기화: ${timeText(s.sync.last_ok_at)}`;
   }
 
+  const scope = li.querySelector(".pre-scope");
+  scope.textContent = s.pre_tables
+    ? `사전 다운로드: 난이도표 ${s.pre_tables.length}개의 곡`
+    : "사전 다운로드: 전곡";
+  scope.hidden = s.login !== "logged_in";
+
   const usage = li.querySelector(".usage");
   const u = s.usage;
   if (u) {
@@ -137,6 +145,9 @@ function renderServer(s) {
   logoutBtn.hidden = s.login === "logged_out";
   linkBtn.hidden = s.login !== "logged_in";
   syncBtn.hidden = s.login !== "logged_in";
+  const preBtn = li.querySelector(".pre-tables");
+  preBtn.hidden = s.login !== "logged_in";
+  preBtn.addEventListener("click", () => run(preBtn, () => openPreDialog(s)));
 
   loginBtn.addEventListener("click", async () => {
     loggingIn.add(s.id);
@@ -191,6 +202,69 @@ function renderServer(s) {
   );
   return li;
 }
+
+/** 사전 다운로드 범위 창. 서버의 난이도표를 받아 고르게 한다. */
+async function openPreDialog(s) {
+  const view = await invoke("pre_tables", { id: s.id });
+  preServer = s.id;
+  $("pre-title").textContent = `사전 다운로드 범위 · ${s.name}`;
+  const form = $("pre-form");
+  const selected = new Set(view.selected || []);
+  form.scope.value = view.selected ? "tables" : "all";
+  const items = view.tables.map((t) => {
+    const li = document.createElement("li");
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = String(t.id);
+    box.checked = selected.has(t.id);
+    const count = document.createElement("span");
+    count.className = "muted";
+    count.textContent = ` (${t.songs}곡)`;
+    label.append(box, ` ${t.symbol} ${t.name}`, count);
+    li.append(label);
+    return li;
+  });
+  $("pre-list").replaceChildren(...items);
+  const empty = $("pre-empty");
+  empty.textContent = view.available
+    ? "서버에 등록된 난이도표가 없습니다."
+    : "이 서버는 난이도표를 지원하지 않아 전곡을 받습니다.";
+  empty.hidden = view.tables.length > 0;
+  form.querySelector('[value="tables"]').disabled = view.tables.length === 0;
+  updatePreForm();
+  // Esc로 닫으면 returnValue가 바뀌지 않으므로 지난 값을 지운다.
+  $("pre-dialog").returnValue = "";
+  $("pre-dialog").showModal();
+}
+
+function updatePreForm() {
+  const form = $("pre-form");
+  const byTable = form.scope.value === "tables";
+  const boxes = [...$("pre-list").querySelectorAll("input")];
+  boxes.forEach((b) => {
+    b.disabled = !byTable;
+  });
+  $("pre-save").disabled = byTable && !boxes.some((b) => b.checked);
+}
+
+$("pre-form").addEventListener("change", updatePreForm);
+
+$("pre-dialog").addEventListener("close", () => {
+  const id = preServer;
+  preServer = null;
+  if ($("pre-dialog").returnValue !== "save" || !id) return;
+  const form = $("pre-form");
+  const selected =
+    form.scope.value === "tables"
+      ? [...$("pre-list").querySelectorAll("input:checked")].map((b) => Number(b.value))
+      : null;
+  showMessage("사전 다운로드 범위를 바꿨습니다. 동기화하는 중입니다…", "info");
+  invoke("set_pre_tables", { id, selected })
+    .then(() => showMessage("사전 다운로드 범위를 바꾸고 동기화했습니다.", "info"))
+    .catch((e) => showMessage(String(e)))
+    .finally(() => refresh().catch(() => {}));
+});
 
 async function refresh() {
   const servers = await invoke("list_servers");
@@ -255,5 +329,5 @@ confirmClick($("quit"), "한 번 더 누르면 종료 (가상 드라이브도 �
 refresh().catch((e) => showMessage(String(e)));
 showLogPath().catch(() => {});
 setInterval(() => {
-  if (loggingIn.size === 0) refresh().catch(() => {});
+  if (loggingIn.size === 0 && !preServer) refresh().catch(() => {});
 }, REFRESH_MS);

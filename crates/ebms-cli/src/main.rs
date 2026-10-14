@@ -49,6 +49,15 @@ enum Cmd {
     Whoami,
     /// 동기화(= 사전 다운로드): 차트 청크, 매니페스트, 사전 청크(배너·프리뷰 등)
     Sync,
+    /// 난이도표 목록과 사전 다운로드 범위. --select나 --all로 범위를 바꾼다(다음 sync부터)
+    Tables {
+        /// 사전 청크를 받을 난이도표 id (쉼표로 구분)
+        #[arg(long, value_delimiter = ',', conflicts_with = "all")]
+        select: Option<Vec<u32>>,
+        /// 전곡의 사전 청크를 받음
+        #[arg(long)]
+        all: bool,
+    },
     /// 가상 트리 목록
     Ls {
         #[arg(default_value = "")]
@@ -181,6 +190,34 @@ fn main() -> anyhow::Result<()> {
             let client = app.client(&app.server(sel)?)?;
             let report = rt.block_on(client.sync()).map_err(login_hint)?;
             println!("{report:?}");
+        }
+        Cmd::Tables { select, all } => {
+            let client = app.client(&app.server(sel)?)?;
+            if all {
+                client.index.set_pre_tables(None)?;
+            } else if let Some(ids) = &select {
+                client.index.set_pre_tables(Some(ids))?;
+            }
+            let selected = client.index.pre_tables()?;
+            match rt.block_on(client.api.pre_tables()).map_err(login_hint)? {
+                Some(tables) => {
+                    for t in &tables.tables {
+                        let mark = match &selected {
+                            Some(ids) if ids.contains(&t.id) => "*",
+                            _ => " ",
+                        };
+                        println!(
+                            "{mark} {:>4}  {} {}  ({} songs)",
+                            t.id, t.symbol, t.name, t.songs
+                        );
+                    }
+                }
+                None => println!("server has no difficulty tables"),
+            }
+            match selected {
+                Some(ids) => println!("pre download: tables {ids:?}"),
+                None => println!("pre download: all songs"),
+            }
         }
         Cmd::Ls { path } => {
             let client = app.client(&app.server(sel)?)?;

@@ -38,6 +38,7 @@ ebms server add http://localhost:8000      # 서버 추가 (여러 개 가능)
 ebms login                                 # 브라우저로 로그인, 세션키는 OS 키체인에 저장
 ebms whoami                                # 계정, 남은 티켓, 이번 달 사전 다운로드 사용량
 ebms sync                                  # 차트·매니페스트·사전 청크 동기화 (사전 다운로드)
+ebms tables [--select 1,2 | --all]         # 난이도표 목록과 사전 다운로드 범위(고른 표의 곡만 / 전곡)
 ebms ls                                    # 곡 폴더 목록
 ebms cat "00001 Artist - Title/bgm01.wav" > out.wav
 ebms mount E:                              # 서버별 폴더로 마운트 (Ctrl-C로 해제)

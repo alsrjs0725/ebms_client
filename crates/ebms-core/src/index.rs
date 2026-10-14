@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS cache_entry(
     pinned INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (song_id, path)
 );
+CREATE TABLE IF NOT EXISTS setting(
+    name TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cache_song(
     song_id INTEGER PRIMARY KEY,
     zip_sha256 TEXT NOT NULL      -- 캐시에 든 파일들이 나온 곡 zip. 매니페스트와 다르면 폐기
@@ -126,6 +130,39 @@ impl Index {
 
     fn con(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.con.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 사전 다운로드할 난이도표(서버의 표 id). `None`이면 전곡.
+    pub fn pre_tables(&self) -> Result<Option<Vec<u32>>> {
+        let con = self.con();
+        let value: Option<String> = con
+            .query_row(
+                "SELECT value FROM setting WHERE name = 'pre_tables'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(value.and_then(|v| serde_json::from_str(&v).ok()))
+    }
+
+    /// 사전 다운로드할 난이도표를 정한다. `None`이면 전곡.
+    pub fn set_pre_tables(&self, tables: Option<&[u32]>) -> Result<()> {
+        let con = self.con();
+        match tables {
+            Some(ids) => {
+                let mut ids = ids.to_vec();
+                ids.sort_unstable();
+                ids.dedup();
+                con.execute(
+                    "INSERT OR REPLACE INTO setting (name, value) VALUES ('pre_tables', ?1)",
+                    [serde_json::to_string(&ids)?],
+                )?;
+            }
+            None => {
+                con.execute("DELETE FROM setting WHERE name = 'pre_tables'", [])?;
+            }
+        }
+        Ok(())
     }
 
     pub fn chunk_hashes(&self, kind: ChunkKind) -> Result<BTreeMap<u32, String>> {

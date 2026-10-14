@@ -86,6 +86,16 @@ impl Server {
             .map_err(|e| Error::Other(e.to_string()))?
     }
 
+    /// 사전 다운로드할 난이도표(서버의 표 id). `None`이면 전곡.
+    pub fn pre_tables(&self) -> Result<Option<Vec<u32>>> {
+        self.client.index.pre_tables()
+    }
+
+    /// 사전 다운로드할 난이도표를 정한다. 다음 동기화부터 고른 표의 곡이 든 사전 청크만 받는다.
+    pub fn set_pre_tables(&self, tables: Option<&[u32]>) -> Result<()> {
+        self.client.index.set_pre_tables(tables)
+    }
+
     /// 동기화하고 바뀐 게 있으면 가상 트리를 다시 만든다.
     pub async fn sync(&self) -> Result<SyncReport> {
         let _guard = self.sync_lock.lock().await;
