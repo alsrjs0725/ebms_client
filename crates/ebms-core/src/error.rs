@@ -1,6 +1,6 @@
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("http: {0}")]
+    #[error("http: {}", http_detail(.0))]
     Http(#[from] reqwest::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -31,6 +31,24 @@ pub enum Error {
     ApiVersion(u32),
     #[error("{0}")]
     Other(String),
+}
+
+/// reqwest는 "error sending request"처럼 겉 메시지만 보여주므로 원인(시간 초과·연결 거부·TLS 등)을 이어 붙인다.
+fn http_detail(e: &reqwest::Error) -> String {
+    let mut out = e.to_string();
+    if e.is_timeout() && !out.contains("timed out") {
+        out.push_str(": timed out");
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(s) = source {
+        let msg = s.to_string();
+        if !out.contains(&msg) {
+            out.push_str(": ");
+            out.push_str(&msg);
+        }
+        source = s.source();
+    }
+    out
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
