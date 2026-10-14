@@ -4,7 +4,13 @@
 //! LR2는 Wine 아래 `C:\...\LR2body.exe`처럼 실행 파일 자체보다 인자에 이름이 나온다.
 
 /// 기본 구동기 이름 (소문자, 파일 이름 앞부분).
-pub const DEFAULT_PLAYERS: &[&str] = &["beatoraja", "lr2oraja", "lr2body", "lunaticrave2"];
+pub const DEFAULT_PLAYERS: &[&str] = &[
+    "beatoraja",
+    "lr2oraja",
+    "lr2body",
+    "lunaticrave2",
+    "qwilight",
+];
 
 /// 실행 파일 `exe`나 명령줄 인자 `args` 중 하나가 `players`의 이름으로 시작하는 파일이면 구동기로 본다.
 /// 인자는 `.jar`·`.exe` 파일만 본다 (`grep -r beatoraja ~` 같은 검색어를 구동기로 오인하지 않도록).
@@ -69,6 +75,11 @@ mod tests {
             &args(&["C:\\LR2\\LR2body.exe"])
         ));
         assert!(is_player(&p, Some("/opt/LR2oraja/lr2oraja"), &[]));
+        assert!(is_player(
+            &p,
+            Some("C:\\Games\\Qwilight\\Qwilight.exe"),
+            &[]
+        ));
     }
 
     #[test]

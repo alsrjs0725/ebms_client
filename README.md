@@ -1,6 +1,6 @@
 # EBMS Client
 
-EBMS 서버의 곡을 가상 드라이브로 보여주고, 구동기(beatoraja 등)가 파일을 읽을 때 에셋을 받아오는 Windows 전용 클라이언트입니다. 설계는 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)를 보세요.
+EBMS 서버의 곡을 가상 드라이브로 보여주고, 구동기(beatoraja, LR2, Qwilight 등)가 파일을 읽을 때 에셋을 받아오는 Windows 전용 클라이언트입니다. 설계는 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)를 보세요.
 
 ## 구성
 
