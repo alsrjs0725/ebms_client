@@ -83,7 +83,7 @@ impl Fetcher {
                 );
                 return Err(Error::NotPlayer { program });
             }
-            self.ensure_song(song, &caller.name()).await?;
+            self.ensure_song(song, &caller.name(), &entry.path).await?;
             return self
                 .cache
                 .get(song.song_id, &entry.path, entry.size)?
@@ -109,8 +109,9 @@ impl Fetcher {
         Ok(path)
     }
 
-    /// 곡 zip 전체를 받아 모든 파일을 캐시에 넣는다. `program`은 로그용 요청 프로그램.
-    pub async fn ensure_song(&self, song: &SongInfo, program: &str) -> Result<()> {
+    /// 곡 zip 전체를 받아 모든 파일을 캐시에 넣는다.
+    /// `program`(요청 프로그램)과 `trigger`(다운로드를 일으킨 곡 안 파일 경로)는 로그용.
+    pub async fn ensure_song(&self, song: &SongInfo, program: &str, trigger: &str) -> Result<()> {
         self.check_backoff()?;
         let lock = self.lock(Key::Song(song.song_id));
         let _guard = lock.lock().await;
@@ -128,6 +129,7 @@ impl Fetcher {
             song_id = song.song_id,
             size = song.zip_size,
             program,
+            trigger,
             "downloading whole song (uses a ticket)"
         );
         let tmp = self.paths.tmp_file(&format!("song_{}", song.song_id));
