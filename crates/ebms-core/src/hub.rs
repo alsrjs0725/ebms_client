@@ -4,6 +4,7 @@
 //! 서버 추가·삭제, 로그인·로그아웃, 동기화를 서버별로 따로 한다. 한 서버의 오류는 다른 서버에 영향을 주지 않는다.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,6 +29,8 @@ pub struct Server {
     status: Mutex<SyncStatus>,
     /// 같은 서버의 동기화가 겹치지 않게
     sync_lock: tokio::sync::Mutex<()>,
+    /// 목록에서 빠짐. 이미 시작한 동기화 묶음이 지운 폴더에 다시 쓰지 않게 한다.
+    removed: AtomicBool,
 }
 
 /// 이 서버가 쓰는 로컬 저장 공간. 설정 창에 보여준다.
@@ -99,6 +102,12 @@ impl Server {
     /// 동기화하고 바뀐 게 있으면 가상 트리를 다시 만든다.
     pub async fn sync(&self) -> Result<SyncReport> {
         let _guard = self.sync_lock.lock().await;
+        if self.removed.load(Ordering::SeqCst) {
+            return Err(Error::Other(format!(
+                "server {} was removed",
+                self.entry.name
+            )));
+        }
         let result = self.client.sync().await;
         // 인덱스를 읽으므로 런타임 밖에서, 설정 창이 기다리지 않게 상태 잠금 밖에서.
         // 실패해도 일부 청크는 바뀌었을 수 있다. 다음 동기화가 옛 청크 판을 지우기 전에 다시 만든다.
@@ -258,13 +267,19 @@ impl Hub {
     /// 로그아웃하고 목록에서 뺀다. `purge`면 로컬 데이터(인덱스·차트·캐시)도 지운다.
     /// 쓰는 중이라 다 못 지운 파일은 다음에 앱을 열 때 지운다.
     pub async fn remove(&self, id: &str, purge: bool) -> Result<ServerEntry> {
-        let entry = self.server(id)?.entry.clone();
+        let server = self.server(id)?;
+        let entry = server.entry.clone();
         self.logout(id).await?;
         self.update_config(|c| {
             c.remove(id);
         })?;
         self.drive.remove(id);
         self.lock().servers.remove(id);
+        // 진행 중인 동기화가 끝나길 기다리고 새 동기화는 막는다. 그래야 인덱스 DB 등 파일이 닫혀
+        // 지울 수 있고(Windows는 열린 파일을 못 지움), 지운 폴더에 동기화가 다시 쓰지 않는다.
+        server.removed.store(true, Ordering::SeqCst);
+        drop(server.sync_lock.lock().await);
+        drop(server);
         if purge {
             let (dir, e) = (self.dir.clone(), entry.clone());
             tokio::task::spawn_blocking(move || dir.purge_server_dir(&e))
@@ -355,6 +370,7 @@ fn open_server(
         fs,
         status: Mutex::new(SyncStatus::default()),
         sync_lock: tokio::sync::Mutex::new(()),
+        removed: AtomicBool::new(false),
     }))
 }
 
