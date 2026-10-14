@@ -151,13 +151,26 @@ impl Fetcher {
         .await;
         // 풀어 넣었으면 곡 zip은 필요 없다. 실패해도 지운다.
         drop(tmp);
-        if let Err(Error::NoTicket { retry_after }) = &result {
-            // 알림 없이 로그에만 남긴다.
-            warn!(
+        match &result {
+            Ok(()) => {}
+            Err(Error::NoTicket { retry_after }) => {
+                // 알림 없이 로그에만 남긴다.
+                warn!(
+                    song_id = song.song_id,
+                    retry_after,
+                    program,
+                    trigger,
+                    "no download ticket, pausing play downloads from this server"
+                );
+                self.pause(*retry_after);
+            }
+            Err(e) => warn!(
                 song_id = song.song_id,
-                retry_after, "no download ticket, pausing play downloads from this server"
-            );
-            self.pause(*retry_after);
+                program,
+                trigger,
+                %e,
+                "whole song download failed"
+            ),
         }
         result?;
         self.evict_in_background();
