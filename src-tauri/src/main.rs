@@ -12,6 +12,7 @@ mod commands;
 mod logging;
 mod mount;
 mod notices;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,6 +61,8 @@ fn main() {
 }
 
 fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    // 단일 인스턴스 확인 전에 업데이트 전 프로세스가 끝나기를 기다린다.
+    update::finish_previous();
     // 코어(다운로드, 가상 FS)와 Tauri가 같은 tokio 런타임을 쓴다.
     let rt = Box::leak(Box::new(tokio::runtime::Runtime::new()?));
     tauri::async_runtime::set(rt.handle().clone());
@@ -82,6 +85,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             hub: hub.clone(),
             log_dir,
         })
+        .manage(update::Update::default())
         .invoke_handler(tauri::generate_handler![
             commands::list_servers,
             commands::add_server,
@@ -101,6 +105,9 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             commands::open_log_dir,
             notices::pending_notices,
             notices::ack_notices,
+            update::update_info,
+            update::dismiss_update,
+            update::apply_update,
         ])
         .setup(move |app| {
             let state = app.state::<AppState>();
@@ -115,6 +122,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             });
             build_settings(app.handle())?;
             notices::check_on_start(app.handle(), state.hub.clone());
+            update::check_on_start(app.handle());
             Ok(())
         })
         // 설정 창을 닫으면 앱을 끝낸다. 가상 드라이브는 아래 `RunEvent::Exit`에서 내린다.

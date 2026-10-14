@@ -29,3 +29,4 @@ ebms-vfs-fuse = { path = "../crates/ebms-vfs-fuse" }
 
 [target.'cfg(windows)'.dependencies]
 ebms-vfs-winfsp = { path = "../crates/ebms-vfs-winfsp" }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

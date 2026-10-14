@@ -14,6 +14,7 @@
 //! - [`players`]: BMS 구동기 판별. 곡 전체 다운로드는 구동기만 일으킨다
 //! - [`hub`]: 등록된 서버 전체 (추가·삭제, 로그인, 동기화). 상주 앱이 쓴다
 //! - [`notice`]: 서버 공지. 상주 앱이 켜질 때 아직 확인하지 않은 공지를 띄운다
+//! - [`update`]: 클라이언트 자동 업데이트 (GitHub Releases)
 
 pub mod api;
 pub mod auth;
@@ -33,6 +34,7 @@ pub mod players;
 pub mod session;
 pub mod sync;
 pub mod tree;
+pub mod update;
 
 pub use client::{Client, Options};
 pub use error::{Error, Result};
