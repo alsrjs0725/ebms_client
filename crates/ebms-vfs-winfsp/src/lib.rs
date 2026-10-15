@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ebms_core::Error;
 use ebms_core::fs::{Attr, Kind, ReadOnlyFs};
+use ebms_core::players::Players;
 use ebms_core::tree::{Ino, ROOT};
 use tokio::sync::{oneshot, watch};
 use tracing::warn;
@@ -52,7 +53,7 @@ const SDDL: windows::core::PCWSTR = w!("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;F
 struct WinFs {
     fs: Arc<dyn ReadOnlyFs>,
     /// 곡 전체를 받을 수 있는 프로그램 이름 ([`ebms_core::players`])
-    players: Arc<[String]>,
+    players: Players,
     rt: tokio::runtime::Handle,
     /// 모든 파일·폴더에 쓰는 보안 설명자
     security: Vec<u8>,
@@ -298,12 +299,12 @@ impl Drop for Mounted {
 }
 
 /// 마운트한다. `mountpoint`는 드라이브 문자(`E:`)나 아직 없는 폴더 경로.
-/// `players`([`ebms_core::config::Config::players`])에 해당하는 프로세스만 받지 않은 플레이 파일을
+/// `players`([`ebms_core::hub::Hub::players`])에 해당하는 프로세스만 받지 않은 플레이 파일을
 /// 읽어 곡 전체를 받을 수 있다. 읽기 응답은 `rt`에서 돈다.
 pub fn spawn_mount(
     fs: Arc<dyn ReadOnlyFs>,
     mountpoint: &Path,
-    players: Vec<String>,
+    players: Players,
     rt: tokio::runtime::Handle,
 ) -> std::io::Result<Mounted> {
     init()?;
@@ -324,7 +325,7 @@ pub fn spawn_mount(
     let (cancel_tx, cancel) = watch::channel(false);
     let context = WinFs {
         fs,
-        players: players.into(),
+        players,
         rt,
         security: security_descriptor()?,
         time: filetime_now(),

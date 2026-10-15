@@ -12,6 +12,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use ebms_core::Error;
 use ebms_core::fs::{Attr, Caller, Kind, ReadOnlyFs};
+use ebms_core::players::Players;
 use fuser::{
     Config, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, INodeNo, IoctlFlags,
     LockOwner, MountOption, OpenAccMode, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
@@ -27,7 +28,7 @@ const TTL: Duration = Duration::from_secs(60);
 struct FuseFs {
     fs: Arc<dyn ReadOnlyFs>,
     /// 곡 전체를 받을 수 있는 프로그램 이름 ([`ebms_core::players`])
-    players: Arc<[String]>,
+    players: Players,
     uid: u32,
     gid: u32,
 }
@@ -36,7 +37,7 @@ struct FuseFs {
 /// 다운로드가 끝난 뒤 런타임 스레드에서도 쓰므로 데이터를 소유한다.
 struct ProcCaller {
     pid: u32,
-    players: Arc<[String]>,
+    players: Players,
 }
 
 impl ProcCaller {
@@ -69,7 +70,7 @@ impl Caller for ProcCaller {
     }
 
     fn is_player(&self) -> bool {
-        ebms_core::players::is_player(&self.players, self.exe().as_deref(), &self.args())
+        self.players.is_player(self.exe().as_deref(), &self.args())
     }
 }
 
@@ -251,12 +252,12 @@ fn clear_stale(mountpoint: &Path) {
 }
 
 /// 백그라운드 스레드에서 마운트한다. 반환값을 drop하면 언마운트된다.
-/// 마운트 위치 폴더가 없으면 만든다. `players`([`ebms_core::config::Config::players`])에
+/// 마운트 위치 폴더가 없으면 만든다. `players`([`ebms_core::hub::Hub::players`])에
 /// 해당하는 프로세스만 받지 않은 플레이 파일을 읽어 곡 전체를 받을 수 있다.
 pub fn spawn_mount(
     fs: Arc<dyn ReadOnlyFs>,
     mountpoint: &Path,
-    players: Vec<String>,
+    players: Players,
 ) -> std::io::Result<BackgroundSession> {
     let mut config = Config::default();
     config.mount_options = vec![
@@ -276,7 +277,7 @@ pub fn spawn_mount(
     fuser::spawn_mount(
         FuseFs {
             fs,
-            players: players.into(),
+            players,
             uid,
             gid,
         },

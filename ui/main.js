@@ -1,4 +1,4 @@
-// 설정 창. 서버 목록·로그인·계정 정보·캐시·가상 드라이브 위치.
+// 설정 창. 서버 목록·로그인·계정 정보·캐시·가상 드라이브 위치·구동기.
 // 서버가 보낸 문자열은 모두 textContent로만 넣는다.
 "use strict";
 
@@ -272,6 +272,7 @@ async function refresh() {
   $("empty").hidden = servers.length > 0;
   await refreshDrive();
   await refreshCacheLimit();
+  await refreshPlayers();
 }
 
 async function refreshDrive() {
@@ -330,6 +331,37 @@ $("cache-form").addEventListener("submit", (ev) => {
     await refresh();
   });
 });
+
+async function refreshPlayers() {
+  const p = await invoke("players");
+  $("default-players").textContent = `기본 지원: ${p.defaults.join(", ")}`;
+  const items = p.custom.map((path) => {
+    const li = document.createElement("li");
+    const span = document.createElement("span");
+    span.className = "path";
+    span.textContent = path;
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "빼기";
+    confirmClick(remove, "한 번 더 누르면 빼기", () =>
+      run(remove, async () => {
+        await invoke("remove_custom_player", { path });
+        await refreshPlayers();
+      }),
+    );
+    li.append(span, remove);
+    return li;
+  });
+  $("custom-players").replaceChildren(...items);
+}
+
+$("add-player").addEventListener("click", () =>
+  run($("add-player"), async () => {
+    const path = await invoke("add_custom_player");
+    if (path) showMessage(`구동기로 추가했습니다: ${path}`, "info");
+    await refreshPlayers();
+  }),
+);
 
 async function showLogPath() {
   const dir = await invoke("log_info");

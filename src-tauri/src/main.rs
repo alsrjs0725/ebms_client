@@ -79,6 +79,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             open_settings(app);
         }))
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             mount: mount::Mount::default(),
             notices: notices::Notices::new(&hub),
@@ -99,6 +100,9 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             commands::set_pre_tables,
             commands::cache_limit_gb,
             commands::set_cache_limit_gb,
+            commands::players,
+            commands::add_custom_player,
+            commands::remove_custom_player,
             commands::drive_info,
             commands::set_mount_point,
             commands::log_info,

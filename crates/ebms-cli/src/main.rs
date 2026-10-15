@@ -455,10 +455,9 @@ fn mount(
     // 서버에 연결되지 않아도 로컬 인덱스로 마운트한다.
     rt.block_on(hub.sync_all());
     #[cfg(target_os = "linux")]
-    let session = ebms_vfs_fuse::spawn_mount(drive, mountpoint, hub.config().players());
+    let session = ebms_vfs_fuse::spawn_mount(drive, mountpoint, hub.players());
     #[cfg(windows)]
-    let session =
-        ebms_vfs_winfsp::spawn_mount(drive, mountpoint, hub.config().players(), hub.runtime());
+    let session = ebms_vfs_winfsp::spawn_mount(drive, mountpoint, hub.players(), hub.runtime());
     let _session = session.with_context(|| format!("mount {}", mountpoint.display()))?;
     tracing::info!(mountpoint = %mountpoint.display(), "mounted");
 

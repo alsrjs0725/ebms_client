@@ -17,6 +17,7 @@ use crate::auth::LoginRequest;
 use crate::config::{AppDir, Config, ServerEntry, is_insecure_url, normalize_url};
 use crate::drive::Drive;
 use crate::fs::EbmsFs;
+use crate::players::Players;
 use crate::session::SessionStore;
 use crate::sync::SyncReport;
 use crate::{Client, Error, Options, Result};
@@ -144,6 +145,8 @@ pub struct Hub {
     use_keyring: bool,
     rt: Handle,
     drive: Arc<Drive>,
+    /// 마운트한 드라이브가 보는 구동기 목록. 설정을 바꾸면 같이 바꾼다.
+    players: Players,
     state: Mutex<State>,
 }
 
@@ -158,6 +161,7 @@ impl Hub {
             use_keyring,
             rt,
             drive: Arc::new(Drive::new()),
+            players: Players::new(config.players()),
             state: Mutex::new(State {
                 config: config.clone(),
                 servers: BTreeMap::new(),
@@ -205,12 +209,18 @@ impl Hub {
         self.lock().config.clone()
     }
 
+    /// 곡 전체를 받을 수 있는 프로그램. 마운트에 넘기면 설정을 바꿀 때 바로 따라간다.
+    pub fn players(&self) -> Players {
+        self.players.clone()
+    }
+
     /// 설정을 바꿔 저장한다.
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) -> Result<Config> {
         let mut state = self.lock();
         let mut config = state.config.clone();
         f(&mut config);
         self.dir.save_config(&config)?;
+        self.players.set(config.players());
         state.config = config.clone();
         Ok(config)
     }

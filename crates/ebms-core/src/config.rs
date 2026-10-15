@@ -3,7 +3,7 @@
 //! 한 사용자가 여러 EBMS 서버에 로그인한다. 계정·세션키·로컬 데이터는 서버마다 따로다.
 //!
 //! ```text
-//! <앱 데이터>/config.toml                      mount_point, extra_players, cache_limit_gb, servers = [{id, url, name}]
+//! <앱 데이터>/config.toml                      mount_point, extra_players, custom_players, cache_limit_gb, servers = [{id, url, name}]
 //! <앱 데이터>/servers/<server_id>/index.sqlite  서버별 로컬 데이터 (paths::Paths)
 //! <앱 데이터>/servers/<server_id>/session       세션키 (키체인을 못 쓸 때만)
 //! <앱 데이터>/servers/<server_id>/.purge        지우다 실패한 폴더 표시 (다음에 다시 지운다)
@@ -32,6 +32,9 @@ pub struct Config {
     /// 기본 구동기([`crate::players::DEFAULT_PLAYERS`]) 외에 곡 전체를 받을 수 있는 프로그램 이름.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_players: Vec<String>,
+    /// 설정 창에서 고른 구동기 실행 파일. 이름이 아니라 전체 경로로 맞춘다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_players: Vec<String>,
     /// 서버별 캐시 한도(GB). 없으면 [`DEFAULT_CACHE_LIMIT_GB`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_limit_gb: Option<u64>,
@@ -65,13 +68,39 @@ impl Config {
         self.cache_limit_gb().saturating_mul(1 << 30)
     }
 
-    /// 곡 전체를 받을 수 있는 프로그램 이름 (기본 구동기 + `extra_players`).
+    /// 곡 전체를 받을 수 있는 프로그램 (기본 구동기 + `extra_players` 이름, `custom_players` 경로).
     pub fn players(&self) -> Vec<String> {
         crate::players::DEFAULT_PLAYERS
             .iter()
             .map(|s| s.to_string())
             .chain(self.extra_players.iter().cloned())
+            .chain(self.custom_players.iter().cloned())
             .collect()
+    }
+
+    /// 구동기 실행 파일을 추가한다. 이미 있으면 `false`.
+    pub fn add_custom_player(&mut self, path: &str) -> Result<bool> {
+        let path = path.trim();
+        if !path.contains(['/', '\\']) || !path.to_lowercase().ends_with(".exe") {
+            return Err(Error::Config(format!("not an .exe file path: {path}")));
+        }
+        let lower = path.to_lowercase();
+        if self
+            .custom_players
+            .iter()
+            .any(|p| p.to_lowercase() == lower)
+        {
+            return Ok(false);
+        }
+        self.custom_players.push(path.to_string());
+        Ok(true)
+    }
+
+    /// 구동기 실행 파일을 뺀다. 없었으면 `false`.
+    pub fn remove_custom_player(&mut self, path: &str) -> bool {
+        let before = self.custom_players.len();
+        self.custom_players.retain(|p| p != path);
+        self.custom_players.len() != before
     }
 
     /// 서버를 추가한다. 같은 주소가 이미 있으면 오류.
@@ -417,6 +446,18 @@ mod tests {
         for url in ["ftp://x", "not a url", "http://x/?a=1", "http://u:p@x"] {
             assert!(normalize_url(url).is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn custom_players() {
+        let mut c = Config::default();
+        assert!(c.add_custom_player(r"D:\Games\Game.exe").unwrap());
+        assert!(!c.add_custom_player(r"d:\games\GAME.exe").unwrap());
+        assert!(c.add_custom_player("Game.exe").is_err());
+        assert!(c.add_custom_player(r"D:\Games\readme.txt").is_err());
+        assert!(c.players().contains(&r"D:\Games\Game.exe".to_string()));
+        assert!(c.remove_custom_player(r"D:\Games\Game.exe"));
+        assert!(!c.remove_custom_player(r"D:\Games\Game.exe"));
     }
 
     #[test]
