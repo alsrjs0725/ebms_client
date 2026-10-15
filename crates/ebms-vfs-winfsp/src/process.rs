@@ -35,7 +35,8 @@ impl ProcessCaller {
 impl Caller for ProcessCaller {
     fn name(&self) -> String {
         let (exe, args) = self.info();
-        let exe = exe.as_deref().map(file_name).unwrap_or("?");
+        // 어느 구동기인지 알 수 있도록 실행 파일은 전체 경로로 남긴다.
+        let exe = exe.as_deref().unwrap_or("?");
         // javaw처럼 실행 파일만으로는 알 수 없는 경우를 위해 명령줄도 남긴다.
         let args: String = args.join(" ").chars().take(200).collect();
         format!("{exe}[{}] {args}", self.pid)
@@ -117,10 +118,6 @@ impl Drop for Process {
         // SAFETY: open에서 연 핸들이다.
         let _ = unsafe { CloseHandle(self.0) };
     }
-}
-
-fn file_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// Windows 명령줄을 인자로 나눈다. 따옴표 안의 공백은 나누지 않고 따옴표는 뺀다.

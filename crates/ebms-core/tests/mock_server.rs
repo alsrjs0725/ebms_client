@@ -969,7 +969,11 @@ fn no_ticket_pauses_every_song_of_the_server_across_restart() {
     // 티켓은 계정 단위라 다른 곡도 서버에 묻지 않는다.
     let err = env
         .rt
-        .block_on(env.client.fetcher.ensure_song(&other_song(), "test"))
+        .block_on(
+            env.client
+                .fetcher
+                .ensure_song(&other_song(), "test", "test.bms"),
+        )
         .unwrap_err();
     assert!(matches!(err, Error::NoTicket { .. }), "{err}");
     assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);

@@ -83,7 +83,7 @@ impl Fetcher {
                 );
                 return Err(Error::NotPlayer { program });
             }
-            self.ensure_song(song, &caller.name()).await?;
+            self.ensure_song(song, &caller.name(), &entry.path).await?;
             return self
                 .cache
                 .get(song.song_id, &entry.path, entry.size)?
@@ -109,8 +109,9 @@ impl Fetcher {
         Ok(path)
     }
 
-    /// 곡 zip 전체를 받아 모든 파일을 캐시에 넣는다. `program`은 로그용 요청 프로그램.
-    pub async fn ensure_song(&self, song: &SongInfo, program: &str) -> Result<()> {
+    /// 곡 zip 전체를 받아 모든 파일을 캐시에 넣는다.
+    /// `program`(요청 프로그램)과 `trigger`(다운로드를 일으킨 곡 안 파일 경로)는 로그용.
+    pub async fn ensure_song(&self, song: &SongInfo, program: &str, trigger: &str) -> Result<()> {
         self.check_backoff()?;
         let lock = self.lock(Key::Song(song.song_id));
         let _guard = lock.lock().await;
@@ -128,6 +129,7 @@ impl Fetcher {
             song_id = song.song_id,
             size = song.zip_size,
             program,
+            trigger,
             "downloading whole song (uses a ticket)"
         );
         let tmp = self.paths.tmp_file(&format!("song_{}", song.song_id));
@@ -149,13 +151,26 @@ impl Fetcher {
         .await;
         // 풀어 넣었으면 곡 zip은 필요 없다. 실패해도 지운다.
         drop(tmp);
-        if let Err(Error::NoTicket { retry_after }) = &result {
-            // 알림 없이 로그에만 남긴다.
-            warn!(
+        match &result {
+            Ok(()) => {}
+            Err(Error::NoTicket { retry_after }) => {
+                // 알림 없이 로그에만 남긴다.
+                warn!(
+                    song_id = song.song_id,
+                    retry_after,
+                    program,
+                    trigger,
+                    "no download ticket, pausing play downloads from this server"
+                );
+                self.pause(*retry_after);
+            }
+            Err(e) => warn!(
                 song_id = song.song_id,
-                retry_after, "no download ticket, pausing play downloads from this server"
-            );
-            self.pause(*retry_after);
+                program,
+                trigger,
+                %e,
+                "whole song download failed"
+            ),
         }
         result?;
         self.evict_in_background();
