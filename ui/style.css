@@ -60,6 +60,10 @@ section > p.muted { margin: 6px 0; }
 .badge.logged_in { color: var(--ok); }
 .badge.needs_login { color: var(--warn); }
 .badge.logged_out { color: var(--muted); }
+.sync-state { font-size: 12px; margin-left: 4px; padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor; }
+.sync-state.done { color: var(--ok); }
+.sync-state.running { color: var(--muted); }
+.sync-state.failed { color: var(--warn); }
 
 .account { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0 0; }
 .account dt { color: var(--muted); }

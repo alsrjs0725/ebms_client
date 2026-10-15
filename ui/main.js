@@ -37,8 +37,11 @@ function bytes(n) {
   return i === 0 ? `${n} B` : `${v.toFixed(1)} ${units[i]}`;
 }
 
+/** PC 시간대 기준 "2026-10-15 13:34". 웹뷰 로캘 설정에 따라 UTC로 보이지 않게 직접 만든다. */
 function timeText(unix) {
-  return new Date(unix * 1000).toLocaleString();
+  const d = new Date(unix * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function addRow(dl, label, value) {
@@ -117,11 +120,23 @@ function renderServer(s) {
   li.querySelector(".session-file").hidden = !s.session_in_file;
 
   const sync = li.querySelector(".sync");
-  if (s.sync.last_error) {
-    sync.textContent = `동기화 실패: ${s.sync.last_error}`;
+  const syncState = li.querySelector(".sync-state");
+  const last = s.sync.last_ok_at ? `마지막 동기화 ${timeText(s.sync.last_ok_at)}` : "";
+  if (s.sync.running) {
+    syncState.textContent = "동기화 중…";
+    syncState.className = "sync-state running";
+    sync.textContent = last;
+  } else if (s.sync.last_error) {
+    syncState.textContent = "동기화 실패";
+    syncState.className = "sync-state failed";
+    sync.textContent = last ? `${s.sync.last_error} · ${last}` : s.sync.last_error;
   } else if (s.sync.last_ok_at) {
-    sync.textContent = `마지막 동기화: ${timeText(s.sync.last_ok_at)}`;
+    syncState.textContent = "동기화 완료";
+    syncState.className = "sync-state done";
+    sync.textContent = last;
   }
+  syncState.hidden = !syncState.textContent;
+  sync.hidden = !sync.textContent;
 
   const scope = li.querySelector(".pre-scope");
   scope.textContent = s.pre_tables
@@ -172,6 +187,9 @@ function renderServer(s) {
   linkBtn.addEventListener("click", () => run(linkBtn, () => invoke("open_account", { id: s.id })));
   syncBtn.addEventListener("click", () =>
     run(syncBtn, async () => {
+      syncState.textContent = "동기화 중…";
+      syncState.className = "sync-state running";
+      syncState.hidden = false;
       await invoke("sync_now", { id: s.id });
       await refresh();
     }),
