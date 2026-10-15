@@ -218,6 +218,25 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             }),
         )
         .route(
+            "/api/pre/sizes",
+            get(|State(s): State<AppState>, headers: HeaderMap| async move {
+                s.authorized(&headers)?;
+                let server = s.server();
+                if server.api < 3 {
+                    return Err(StatusCode::NOT_FOUND);
+                }
+                let sizes = |map: &HashMap<u32, Vec<u8>>| -> HashMap<String, serde_json::Value> {
+                    map.iter()
+                        .map(|(k, v)| (k.to_string(), json!({"sha256": sha(v), "size": v.len()})))
+                        .collect()
+                };
+                Ok(axum::Json(json!({
+                    "chart": sizes(&server.chart_chunks),
+                    "asset": sizes(&server.pre_chunks),
+                })))
+            }),
+        )
+        .route(
             "/api/pre/tables",
             get(|State(s): State<AppState>, headers: HeaderMap| async move {
                 s.authorized(&headers)?;
@@ -1409,4 +1428,53 @@ fn server_without_difficulty_tables_syncs_every_pre_chunk() {
     env.client.index.set_pre_tables(Some(&[1])).unwrap();
     let report = env.rt.block_on(env.client.sync()).unwrap();
     assert_eq!(report.pre_chunks_updated, vec![0]);
+}
+
+#[test]
+fn pending_download_counts_only_missing_chunks_for_selected_tables() {
+    let env = setup(true);
+    // 이전 서버는 크기를 모른다.
+    assert_eq!(
+        env.rt.block_on(env.client.pending_download()).unwrap(),
+        None
+    );
+
+    let env = setup_with_pre_chunk();
+    let other = pre_chunk(40, &[("banner.png", b"other")]);
+    let (chart, pre0, pre1) = {
+        let mut server = env.state.server();
+        server.pre_chunks.insert(1, other);
+        server.tables = Some(json!({
+            "tables": [{"id": 1, "name": "Insane", "symbol": "★"}, {"id": 2, "name": "Normal", "symbol": "☆"}],
+            "chunks": {"0": [1], "1": [2]},
+        }));
+        let chart: usize = server.chart_chunks.values().map(Vec::len).sum();
+        (
+            chart as u64,
+            server.pre_chunks[&0].len() as u64,
+            server.pre_chunks[&1].len() as u64,
+        )
+    };
+    let p = env
+        .rt
+        .block_on(env.client.pending_download())
+        .unwrap()
+        .unwrap();
+    assert!(p.tables_known);
+    assert_eq!(p.chart_bytes, chart);
+    assert_eq!(p.pre_for(None), (pre0 + pre1, 2));
+    assert_eq!(p.pre_for(Some(&[2])), (pre1, 1));
+    assert_eq!(p.pre_for(Some(&[3])), (0, 0));
+
+    // 받은 청크는 빼고 센다.
+    env.client.index.set_pre_tables(Some(&[1])).unwrap();
+    env.rt.block_on(env.client.sync()).unwrap();
+    let p = env
+        .rt
+        .block_on(env.client.pending_download())
+        .unwrap()
+        .unwrap();
+    assert_eq!((p.chart_bytes, p.chart_chunks), (0, 0));
+    assert_eq!(p.pre_for(Some(&[1])), (0, 0));
+    assert_eq!(p.pre_for(None), (pre1, 1));
 }
