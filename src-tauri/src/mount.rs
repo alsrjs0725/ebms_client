@@ -142,7 +142,13 @@ fn spawn(hub: &Hub, point: &Path) -> std::io::Result<Session> {
 
 #[cfg(windows)]
 fn spawn(hub: &Hub, point: &Path) -> std::io::Result<Session> {
-    ebms_vfs_winfsp::spawn_mount(hub.drive(), point, hub.players(), hub.runtime())
+    ebms_vfs_winfsp::spawn_mount(
+        hub.drive(),
+        point,
+        hub.players(),
+        hub.open_log(),
+        hub.runtime(),
+    )
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]

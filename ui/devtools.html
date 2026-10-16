@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EBMS 개발자 도구</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="devtools.js" defer></script>
+</head>
+<body class="devtools">
+  <header class="devtools-bar">
+    <strong>열린 파일</strong>
+    <input id="filter" type="search" placeholder="경로·프로세스 필터">
+    <label><input id="pause" type="checkbox"> 일시정지</label>
+    <button id="clear" class="secondary">지우기</button>
+    <span id="count" class="muted"></span>
+  </header>
+  <p class="muted devtools-note">이 창이 열려 있는 동안만 기록합니다. 최근 1000개까지 메모리에만 둡니다.</p>
+  <table class="opens">
+    <thead>
+      <tr><th>시각</th><th>프로세스</th><th>경로</th><th>크기</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+</body>
+</html>
