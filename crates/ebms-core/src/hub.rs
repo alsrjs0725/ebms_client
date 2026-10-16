@@ -68,10 +68,29 @@ pub const SONG_SEARCH_LIMIT: usize = 50;
 /// 마지막 동기화 결과. 설정 창에만 보여준다.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct SyncStatus {
-    /// 마지막으로 성공한 시각(unix 초)
+    /// 마지막으로 성공한 시각(unix 초). 앱을 다시 켜도 남게 서버 폴더에 적어 둔다.
     pub last_ok_at: Option<i64>,
     /// 마지막 시도가 실패했으면 그 오류
     pub last_error: Option<String>,
+    /// 지금 동기화 중
+    pub running: bool,
+}
+
+/// 마지막 동기화 성공 시각을 적어 두는 파일 (서버 폴더 안)
+const LAST_SYNC_FILE: &str = "last_sync";
+
+fn load_last_sync(server_dir: &std::path::Path) -> Option<i64> {
+    std::fs::read_to_string(server_dir.join(LAST_SYNC_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn save_last_sync(server_dir: &std::path::Path, at: i64) {
+    if let Err(e) = std::fs::write(server_dir.join(LAST_SYNC_FILE), at.to_string()) {
+        warn!(%e, "could not save last sync time");
+    }
 }
 
 impl Server {
@@ -215,6 +234,10 @@ impl Server {
                 self.entry.name
             )));
         }
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .running = true;
         let result = self.client.sync().await;
         // 인덱스를 읽으므로 런타임 밖에서, 설정 창이 기다리지 않게 상태 잠금 밖에서.
         // 실패해도 일부 청크는 바뀌었을 수 있다. 다음 동기화가 옛 청크 판을 지우기 전에 다시 만든다.
@@ -222,14 +245,26 @@ impl Server {
             self.reload().await;
         }
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
-        match &result {
+        status.running = false;
+        let saved = match &result {
             Ok(_) => {
-                status.last_ok_at = Some(unix_now());
+                let now = unix_now();
+                status.last_ok_at = Some(now);
                 status.last_error = None;
+                Some(now)
             }
-            Err(e) => status.last_error = Some(e.to_string()),
-        }
+            Err(e) => {
+                status.last_error = Some(e.to_string());
+                None
+            }
+        };
         drop(status);
+        // 지운 서버의 폴더를 다시 만들지 않게
+        if let Some(at) = saved
+            && !self.removed.load(Ordering::SeqCst)
+        {
+            save_last_sync(&self.client.paths.root, at);
+        }
         result
     }
 }
@@ -505,7 +540,10 @@ fn open_server(
         entry: entry.clone(),
         client,
         fs,
-        status: Mutex::new(SyncStatus::default()),
+        status: Mutex::new(SyncStatus {
+            last_ok_at: load_last_sync(&dir.server_dir(entry)),
+            ..SyncStatus::default()
+        }),
         sync_lock: tokio::sync::Mutex::new(()),
         removed: AtomicBool::new(false),
     }))
@@ -516,4 +554,17 @@ pub(crate) fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn last_sync_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_last_sync(dir.path()), None);
+        save_last_sync(dir.path(), 1_760_500_000);
+        assert_eq!(load_last_sync(dir.path()), Some(1_760_500_000));
+    }
 }

@@ -60,6 +60,10 @@ section > p.muted { margin: 6px 0; }
 .badge.logged_in { color: var(--ok); }
 .badge.needs_login { color: var(--warn); }
 .badge.logged_out { color: var(--muted); }
+.sync-state { font-size: 12px; margin-left: 4px; padding: 1px 6px; border-radius: 999px; border: 1px solid currentColor; }
+.sync-state.done { color: var(--ok); }
+.sync-state.running { color: var(--muted); }
+.sync-state.failed { color: var(--warn); }
 
 .account { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0 0; }
 .account dt { color: var(--muted); }
@@ -107,6 +111,7 @@ footer { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--line);
 .pre-list { list-style: none; margin: 4px 0 0 22px; padding: 0; max-height: 280px; overflow-y: auto; }
 .pre-list li { margin: 2px 0; }
 .pre-list .muted { font-size: 12px; }
+.pending { margin: 8px 0 0; font-weight: 600; }
 
 .update footer { gap: 8px; }
 .update .notes { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }

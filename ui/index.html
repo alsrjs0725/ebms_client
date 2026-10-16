@@ -76,6 +76,7 @@
       <label class="choice"><input type="radio" name="scope" value="tables"> 고른 난이도표의 곡만</label>
       <ul id="pre-list" class="pre-list"></ul>
       <p id="pre-empty" class="muted" hidden></p>
+      <p id="pre-pending" class="pending" hidden></p>
       <div class="actions">
         <button id="pre-save" type="submit" value="save">저장하고 동기화</button>
         <button type="submit" value="cancel" class="secondary" formnovalidate>취소</button>
@@ -108,6 +109,7 @@
         <div>
           <strong class="name"></strong>
           <span class="badge"></span>
+          <span class="sync-state" hidden></span>
         </div>
         <span class="url muted"></span>
       </div>

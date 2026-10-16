@@ -102,6 +102,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             commands::search_songs,
             commands::add_personal_charts,
             commands::remove_personal_chart,
+            commands::pending_download,
             commands::cache_limit_gb,
             commands::set_cache_limit_gb,
             commands::players,

@@ -21,6 +21,11 @@ let preServer = null;
 /** 개인 채보 창을 연 서버 */
 let personalServer = null;
 const SEARCH_DELAY_MS = 200;
+/** 사전 다운로드 범위 창에서 쓰는 받을 용량(`pending_download`). 계산 중이면 "loading", 모르면 null */
+let prePending = null;
+/** 서버 카드에 보여 줄 받을 용량. 서버 id → { key, at, value } */
+const pendingCache = new Map();
+const PENDING_TTL_MS = 5 * 60_000;
 
 function showMessage(text, kind = "error") {
   const el = $("message");
@@ -40,8 +45,11 @@ function bytes(n) {
   return i === 0 ? `${n} B` : `${v.toFixed(1)} ${units[i]}`;
 }
 
+/** PC 시간대 기준 "2026-10-15 13:34". 웹뷰 로캘 설정에 따라 UTC로 보이지 않게 직접 만든다. */
 function timeText(unix) {
-  return new Date(unix * 1000).toLocaleString();
+  const d = new Date(unix * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function addRow(dl, label, value) {
@@ -120,17 +128,37 @@ function renderServer(s) {
   li.querySelector(".session-file").hidden = !s.session_in_file;
 
   const sync = li.querySelector(".sync");
-  if (s.sync.last_error) {
-    sync.textContent = `동기화 실패: ${s.sync.last_error}`;
+  const syncState = li.querySelector(".sync-state");
+  const last = s.sync.last_ok_at ? `마지막 동기화 ${timeText(s.sync.last_ok_at)}` : "";
+  if (s.sync.running) {
+    syncState.textContent = "동기화 중…";
+    syncState.className = "sync-state running";
+    sync.textContent = last;
+  } else if (s.sync.last_error) {
+    syncState.textContent = "동기화 실패";
+    syncState.className = "sync-state failed";
+    sync.textContent = last ? `${s.sync.last_error} · ${last}` : s.sync.last_error;
   } else if (s.sync.last_ok_at) {
-    sync.textContent = `마지막 동기화: ${timeText(s.sync.last_ok_at)}`;
+    syncState.textContent = "동기화 완료";
+    syncState.className = "sync-state done";
+    sync.textContent = last;
   }
+  syncState.hidden = !syncState.textContent;
+  sync.hidden = !sync.textContent;
 
   const scope = li.querySelector(".pre-scope");
   scope.textContent = s.pre_tables
     ? `사전 다운로드: 난이도표 ${s.pre_tables.length}개의 곡`
     : "사전 다운로드: 전곡";
   scope.hidden = s.login !== "logged_in";
+  if (!scope.hidden) {
+    const base = scope.textContent;
+    cardPending(s)
+      .then((p) => {
+        if (p) scope.textContent = `${base} · 다음 동기화에 받을 용량 ${pendingText(p, s.pre_tables)}`;
+      })
+      .catch(() => {});
+  }
 
   const usage = li.querySelector(".usage");
   const u = s.usage;
@@ -177,6 +205,9 @@ function renderServer(s) {
   linkBtn.addEventListener("click", () => run(linkBtn, () => invoke("open_account", { id: s.id })));
   syncBtn.addEventListener("click", () =>
     run(syncBtn, async () => {
+      syncState.textContent = "동기화 중…";
+      syncState.className = "sync-state running";
+      syncState.hidden = false;
       await invoke("sync_now", { id: s.id });
       await refresh();
     }),
@@ -208,10 +239,44 @@ function renderServer(s) {
   return li;
 }
 
+/** 고른 난이도표(null이면 전곡)로 동기화하면 받을 { chart, pre, total } 바이트. 서버의 sync_pre와 같은 기준. */
+function pendingBytes(p, selected) {
+  const pick = selected && p.tables_known ? new Set(selected) : null;
+  const pre = p.pre
+    .filter((c) => !pick || c.tables.some((t) => pick.has(t)))
+    .reduce((sum, c) => sum + c.size, 0);
+  return { chart: p.chart_bytes, pre, total: p.chart_bytes + pre };
+}
+
+function pendingText(p, selected) {
+  const b = pendingBytes(p, selected);
+  if (b.total === 0) return "없음 (이미 모두 받음)";
+  return `약 ${bytes(b.total)} (사전 파일 ${bytes(b.pre)} · 차트 ${bytes(b.chart)})`;
+}
+
+/** 서버 카드의 받을 용량. 동기화가 끝나면(last_ok_at이 바뀌면) 다시 센다. */
+async function cardPending(s) {
+  const key = `${s.sync.last_ok_at}|${JSON.stringify(s.pre_tables)}`;
+  const hit = pendingCache.get(s.id);
+  if (hit && hit.key === key && Date.now() - hit.at < PENDING_TTL_MS) return hit.value;
+  const value = await invoke("pending_download", { id: s.id });
+  pendingCache.set(s.id, { key, at: Date.now(), value });
+  return value;
+}
+
 /** 사전 다운로드 범위 창. 서버의 난이도표를 받아 고르게 한다. */
 async function openPreDialog(s) {
+  const pendingReq = invoke("pending_download", { id: s.id }).catch(() => null);
   const view = await invoke("pre_tables", { id: s.id });
   preServer = s.id;
+  prePending = "loading";
+  $("pre-pending").textContent = "받을 용량을 계산하는 중…";
+  $("pre-pending").hidden = false;
+  pendingReq.then((p) => {
+    if (preServer !== s.id) return;
+    prePending = p;
+    updatePreForm();
+  });
   $("pre-title").textContent = `사전 다운로드 범위 · ${s.name}`;
   const form = $("pre-form");
   const selected = new Set(view.selected || []);
@@ -250,7 +315,13 @@ function updatePreForm() {
   boxes.forEach((b) => {
     b.disabled = !byTable;
   });
-  $("pre-save").disabled = byTable && !boxes.some((b) => b.checked);
+  const checked = boxes.filter((b) => b.checked).map((b) => Number(b.value));
+  $("pre-save").disabled = byTable && !checked.length;
+  // 계산 중이면 그대로 두고, 이전 서버라 크기를 모르면 숨긴다.
+  const pending = $("pre-pending");
+  if (prePending === "loading") return;
+  pending.hidden = !prePending;
+  if (prePending) pending.textContent = `저장하면 받을 용량: ${pendingText(prePending, byTable ? checked : null)}`;
 }
 
 $("pre-form").addEventListener("change", updatePreForm);
@@ -258,6 +329,7 @@ $("pre-form").addEventListener("change", updatePreForm);
 $("pre-dialog").addEventListener("close", () => {
   const id = preServer;
   preServer = null;
+  prePending = null;
   if ($("pre-dialog").returnValue !== "save" || !id) return;
   const form = $("pre-form");
   const selected =
@@ -265,6 +337,7 @@ $("pre-dialog").addEventListener("close", () => {
       ? [...$("pre-list").querySelectorAll("input:checked")].map((b) => Number(b.value))
       : null;
   showMessage("사전 다운로드 범위를 바꿨습니다. 동기화하는 중입니다…", "info");
+  pendingCache.delete(id);
   invoke("set_pre_tables", { id, selected })
     .then(() => showMessage("사전 다운로드 범위를 바꾸고 동기화했습니다.", "info"))
     .catch((e) => showMessage(String(e)))

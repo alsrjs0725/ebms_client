@@ -172,6 +172,20 @@ impl PreTables {
     }
 }
 
+/// `GET /api/pre/sizes`의 청크 하나.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct ChunkSize {
+    pub sha256: String,
+    pub size: u64,
+}
+
+/// `GET /api/pre/sizes` 응답. 차트·사전 청크별 해시와 바이트 크기.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChunkSizes {
+    pub chart: BTreeMap<u32, ChunkSize>,
+    pub asset: BTreeMap<u32, ChunkSize>,
+}
+
 /// 서버 HTTP API 클라이언트. 세션키가 있으면 모든 요청에 `Authorization: Bearer`로 싣는다.
 pub struct Api {
     base: String,
@@ -385,6 +399,33 @@ impl Api {
         Ok(Some(PreTables {
             tables: raw.tables,
             chunks,
+        }))
+    }
+
+    /// 차트·사전 청크의 크기. 크기 API가 없는 이전 서버면 None.
+    pub async fn chunk_sizes(&self) -> Result<Option<ChunkSizes>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            chart: BTreeMap<String, ChunkSize>,
+            asset: BTreeMap<String, ChunkSize>,
+        }
+        let raw: Raw = match self.get("/api/pre/sizes").await {
+            Ok(resp) => resp.json().await?,
+            Err(Error::Status { status: 404, .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let keyed = |map: BTreeMap<String, ChunkSize>| {
+            map.into_iter()
+                .map(|(k, v)| {
+                    k.parse().map(|k| (k, v)).map_err(|_| {
+                        Error::Other(format!("bad chunk id {k:?} from /api/pre/sizes"))
+                    })
+                })
+                .collect::<Result<BTreeMap<_, _>>>()
+        };
+        Ok(Some(ChunkSizes {
+            chart: keyed(raw.chart)?,
+            asset: keyed(raw.asset)?,
         }))
     }
 
