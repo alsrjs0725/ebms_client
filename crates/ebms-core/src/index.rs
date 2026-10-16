@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::Result;
 use crate::manifest::SongManifest;
+use crate::personal::PersonalChart;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS chunk(
@@ -50,6 +51,15 @@ CREATE TABLE IF NOT EXISTS cache_entry(
 CREATE TABLE IF NOT EXISTS setting(
     name TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS personal_chart(
+    song_id INTEGER NOT NULL,
+    name TEXT NOT NULL,           -- 원래 파일 이름 (전체 경로는 남기지 않음)
+    sha256 TEXT NOT NULL,         -- 복사본 personal/<sha256>.<ext>
+    ext TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (song_id, name)
 );
 CREATE TABLE IF NOT EXISTS cache_song(
     song_id INTEGER PRIMARY KEY,
@@ -344,6 +354,91 @@ impl Index {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
+    pub fn has_song(&self, song_id: u32) -> Result<bool> {
+        Ok(self
+            .con()
+            .query_row("SELECT 1 FROM song WHERE id = ?1", [song_id], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
+    /// 개인 채보 연결을 넣는다. 같은 곡·이름이 있으면 바꾸고 옛 행을 돌려준다.
+    pub fn personal_put(&self, c: &PersonalChart) -> Result<Option<PersonalChart>> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        let old = tx
+            .query_row(
+                &format!("{PERSONAL_SELECT} WHERE song_id = ?1 AND name = ?2"),
+                params![c.song_id, c.name],
+                personal_row,
+            )
+            .optional()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO personal_chart (song_id, name, sha256, ext, size, added_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                c.song_id,
+                c.name,
+                c.sha256,
+                c.ext,
+                c.size as i64,
+                c.added_at
+            ],
+        )?;
+        tx.commit()?;
+        Ok(old.filter(|o| o.sha256 != c.sha256 || o.ext != c.ext))
+    }
+
+    /// 개인 채보 연결을 지우고 지운 행을 돌려준다.
+    pub fn personal_remove(&self, song_id: u32, name: &str) -> Result<Option<PersonalChart>> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        let old = tx
+            .query_row(
+                &format!("{PERSONAL_SELECT} WHERE song_id = ?1 AND name = ?2"),
+                params![song_id, name],
+                personal_row,
+            )
+            .optional()?;
+        tx.execute(
+            "DELETE FROM personal_chart WHERE song_id = ?1 AND name = ?2",
+            params![song_id, name],
+        )?;
+        tx.commit()?;
+        Ok(old)
+    }
+
+    /// 같은 복사본을 쓰는 연결이 남아 있는지.
+    pub fn personal_in_use(&self, sha256: &str, ext: &str) -> Result<bool> {
+        Ok(self
+            .con()
+            .query_row(
+                "SELECT 1 FROM personal_chart WHERE sha256 = ?1 AND ext = ?2 LIMIT 1",
+                params![sha256, ext],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// 개인 채보 전체. 곡, 이름 순.
+    pub fn personal_list(&self) -> Result<Vec<PersonalChart>> {
+        let con = self.con();
+        let mut stmt = con.prepare(&format!("{PERSONAL_SELECT} ORDER BY song_id, name"))?;
+        let rows = stmt.query_map([], personal_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 곡 하나의 개인 채보. 연결한 순.
+    pub fn personal_for_song(&self, song_id: u32) -> Result<Vec<PersonalChart>> {
+        let con = self.con();
+        let mut stmt = con.prepare(&format!(
+            "{PERSONAL_SELECT} WHERE song_id = ?1 ORDER BY added_at, name"
+        ))?;
+        let rows = stmt.query_map([song_id], personal_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn charts(&self) -> Result<HashMap<String, ChartRow>> {
         let con = self.con();
         let mut stmt = con.prepare(&format!("{CHART_SELECT} FROM {CHART_FROM}"))?;
@@ -503,6 +598,20 @@ impl Index {
 const CHART_SELECT: &str =
     "SELECT h.sha256, h.ext, h.size, h.crc32, h.chunk_id, h.data_offset, c.sha256";
 const CHART_FROM: &str = "chart h JOIN chunk c ON c.kind = 'chart' AND c.id = h.chunk_id";
+
+const PERSONAL_SELECT: &str =
+    "SELECT song_id, name, sha256, ext, size, added_at FROM personal_chart";
+
+fn personal_row(r: &rusqlite::Row) -> rusqlite::Result<PersonalChart> {
+    Ok(PersonalChart {
+        song_id: r.get(0)?,
+        name: r.get(1)?,
+        sha256: r.get(2)?,
+        ext: r.get(3)?,
+        size: r.get::<_, i64>(4)? as u64,
+        added_at: r.get(5)?,
+    })
+}
 
 fn chart_row(r: &rusqlite::Row) -> rusqlite::Result<ChartRow> {
     Ok(ChartRow {

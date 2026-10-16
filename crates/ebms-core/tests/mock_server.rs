@@ -788,6 +788,31 @@ fn tree_and_chart_reads_need_no_download() {
 }
 
 #[test]
+fn personal_chart_shows_in_song_folder_without_upload() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let src = env._dir.path().join("my_another.bme");
+    std::fs::write(&src, b"#TITLE mine\n#WAV01 bgm01.wav\n").unwrap();
+    ebms_core::personal::add(&env.client.paths, &env.client.index, 1, &src).unwrap();
+    std::fs::remove_file(&src).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+
+    assert_eq!(
+        read_all(&fs, &format!("{SONG}/my_another.bme")).unwrap(),
+        b"#TITLE mine\n#WAV01 bgm01.wav\n"
+    );
+    let c = &env.state.counters;
+    assert_eq!(
+        c.play.load(Ordering::SeqCst) + c.pre_file.load(Ordering::SeqCst),
+        0
+    );
+
+    ebms_core::personal::remove(&env.client.paths, &env.client.index, 1, "my_another.bme").unwrap();
+    fs.reload().unwrap();
+    assert!(fs.resolve(&format!("{SONG}/my_another.bme")).is_none());
+}
+
+#[test]
 fn pre_files_alone_and_play_files_as_whole_song() {
     let env = setup(true);
     env.rt.block_on(env.client.sync()).unwrap();

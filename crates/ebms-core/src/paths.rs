@@ -12,6 +12,7 @@ pub const STALE_AGE: Duration = Duration::from_secs(60 * 60);
 /// <root>/charts/chart_chunk_00000.<sha256 앞 16자>.zip
 /// <root>/pre/pre_chunk_00000.<sha256 앞 16자>.zip
 /// <root>/cache/<song_id>/<path>
+/// <root>/personal/<sha256>.<ext>
 /// <root>/tmp/
 /// <root>/no_ticket_until
 /// ```
@@ -26,7 +27,13 @@ impl Paths {
     }
 
     pub fn create_dirs(&self) -> std::io::Result<()> {
-        for dir in [self.charts(), self.pre(), self.cache(), self.tmp()] {
+        for dir in [
+            self.charts(),
+            self.pre(),
+            self.cache(),
+            self.tmp(),
+            self.personal(),
+        ] {
             std::fs::create_dir_all(dir)?;
         }
         Ok(())
@@ -65,6 +72,15 @@ impl Paths {
 
     pub fn cache(&self) -> PathBuf {
         self.root.join("cache")
+    }
+
+    /// 사용자가 곡에 연결한 개인 채보의 복사본([`crate::personal`]). 캐시와 달리 지우지 않는다.
+    pub fn personal(&self) -> PathBuf {
+        self.root.join("personal")
+    }
+
+    pub fn personal_chart(&self, sha256: &str, ext: &str) -> PathBuf {
+        self.personal().join(format!("{sha256}.{ext}"))
     }
 
     pub fn tmp(&self) -> PathBuf {

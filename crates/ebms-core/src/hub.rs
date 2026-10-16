@@ -17,6 +17,7 @@ use crate::auth::LoginRequest;
 use crate::config::{AppDir, Config, ServerEntry, is_insecure_url, normalize_url};
 use crate::drive::Drive;
 use crate::fs::EbmsFs;
+use crate::personal::PersonalChart;
 use crate::players::Players;
 use crate::session::SessionStore;
 use crate::sync::SyncReport;
@@ -44,6 +45,25 @@ pub struct LocalUsage {
     /// 캐시 + 인덱스 + 차트. 서버를 지울 때 함께 지울 수 있는 양
     pub total_bytes: u64,
 }
+
+/// 곡 검색 결과 하나. 개인 채보를 연결할 곡을 고를 때 쓴다.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct SongHit {
+    pub song_id: u32,
+    /// 가상 드라이브에 보이는 곡 폴더 이름
+    pub dir: String,
+}
+
+/// 연결한 개인 채보와 그 곡 폴더 이름. 곡이 서버에서 사라졌으면 `dir`이 None.
+#[derive(Clone, Debug, Serialize)]
+pub struct LinkedChart {
+    #[serde(flatten)]
+    pub chart: PersonalChart,
+    pub dir: Option<String>,
+}
+
+/// 곡 검색 결과 최대 개수.
+pub const SONG_SEARCH_LIMIT: usize = 50;
 
 /// 마지막 동기화 결과. 설정 창에만 보여준다.
 #[derive(Clone, Debug, Default, Serialize)]
@@ -100,6 +120,92 @@ impl Server {
         self.client.index.set_pre_tables(tables)
     }
 
+    /// 곡 폴더 이름(`00123 Artist - Title`)에 `query`가 든 곡. 대소문자를 무시하고, 빈칸으로 나눈 낱말이 모두
+    /// 들어 있어야 한다. 최대 [`SONG_SEARCH_LIMIT`]곡. 인덱스를 읽으므로 런타임 밖에서 부른다.
+    pub fn search_songs(&self, query: &str) -> Result<Vec<SongHit>> {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if words.is_empty() {
+            return Ok(Vec::new());
+        }
+        let hits = self
+            .client
+            .index
+            .song_folders()?
+            .into_iter()
+            .map(|(song_id, folder)| SongHit {
+                song_id,
+                dir: crate::tree::song_dir_name(song_id, &folder),
+            })
+            .filter(|h| {
+                let dir = h.dir.to_lowercase();
+                words.iter().all(|w| dir.contains(w.as_str()))
+            })
+            .take(SONG_SEARCH_LIMIT)
+            .collect();
+        Ok(hits)
+    }
+
+    /// 연결한 개인 채보 전체. 인덱스를 읽으므로 런타임 밖에서 부른다.
+    pub fn personal_charts(&self) -> Result<Vec<LinkedChart>> {
+        let index = &self.client.index;
+        let dirs: std::collections::HashMap<u32, String> =
+            index.song_folders()?.into_iter().collect();
+        Ok(index
+            .personal_list()?
+            .into_iter()
+            .map(|chart| LinkedChart {
+                dir: dirs
+                    .get(&chart.song_id)
+                    .map(|f| crate::tree::song_dir_name(chart.song_id, f)),
+                chart,
+            })
+            .collect())
+    }
+
+    /// 채보 파일을 복사해 곡에 연결하고 가상 트리를 다시 만든다. 서버에는 올리지 않는다.
+    pub async fn add_personal_charts(
+        &self,
+        song_id: u32,
+        files: Vec<std::path::PathBuf>,
+    ) -> Result<Vec<PersonalChart>> {
+        let (paths, index) = (self.client.paths.clone(), self.client.index.clone());
+        let added = tokio::task::spawn_blocking(move || {
+            files
+                .iter()
+                .map(|f| crate::personal::add(&paths, &index, song_id, f))
+                .collect::<Result<Vec<_>>>()
+        })
+        .await
+        .map_err(|e| Error::Other(e.to_string()));
+        // 일부만 연결됐어도 보이도록 실패와 상관없이 다시 만든다.
+        self.reload().await;
+        added?
+    }
+
+    /// 개인 채보 연결을 끊고 가상 트리를 다시 만든다.
+    pub async fn remove_personal_chart(&self, song_id: u32, name: String) -> Result<bool> {
+        let (paths, index) = (self.client.paths.clone(), self.client.index.clone());
+        let removed = tokio::task::spawn_blocking(move || {
+            crate::personal::remove(&paths, &index, song_id, &name)
+        })
+        .await
+        .map_err(|e| Error::Other(e.to_string()))
+        .and_then(|r| r)?;
+        self.reload().await;
+        Ok(removed)
+    }
+
+    async fn reload(&self) {
+        let fs = self.fs.clone();
+        let reloaded = tokio::task::spawn_blocking(move || fs.reload())
+            .await
+            .map_err(|e| Error::Other(e.to_string()))
+            .and_then(|r| r);
+        if let Err(e) = reloaded {
+            warn!(server = %self.entry.name, %e, "reload failed");
+        }
+    }
+
     /// 동기화하고 바뀐 게 있으면 가상 트리를 다시 만든다.
     pub async fn sync(&self) -> Result<SyncReport> {
         let _guard = self.sync_lock.lock().await;
@@ -113,14 +219,7 @@ impl Server {
         // 인덱스를 읽으므로 런타임 밖에서, 설정 창이 기다리지 않게 상태 잠금 밖에서.
         // 실패해도 일부 청크는 바뀌었을 수 있다. 다음 동기화가 옛 청크 판을 지우기 전에 다시 만든다.
         if !matches!(&result, Ok(report) if !report.changed()) {
-            let fs = self.fs.clone();
-            let reloaded = tokio::task::spawn_blocking(move || fs.reload())
-                .await
-                .map_err(|e| Error::Other(e.to_string()))
-                .and_then(|r| r);
-            if let Err(e) = reloaded {
-                warn!(server = %self.entry.name, %e, "reload failed");
-            }
+            self.reload().await;
         }
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         match &result {
