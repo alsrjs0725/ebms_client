@@ -42,7 +42,7 @@ pub use client::{Client, Options};
 pub use error::{Error, Result};
 
 /// 서버가 차트로 취급하는 확장자 (소문자).
-pub const CHART_EXTS: &[&str] = &["bms", "bme", "bml", "pms"];
+pub const CHART_EXTS: &[&str] = &["bms", "bme", "bml", "pms", "bmson"];
 
 /// 지원하는 서버 API 버전. 1은 로그인이 들어가고 기존 다운로드 API가 아직 남아 있는 서버.
 pub const API_VERSIONS: std::ops::RangeInclusive<u32> = 1..=3;
