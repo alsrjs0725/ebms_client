@@ -111,6 +111,11 @@ impl Client {
         Ok(report)
     }
 
+    /// 지금 동기화하면 받을 청크 용량. 크기 API가 없는 이전 서버면 None.
+    pub async fn pending_download(&self) -> Result<Option<crate::sync::PendingDownload>> {
+        crate::sync::pending_download(&self.api, &self.paths, &self.index).await
+    }
+
     /// 가상 FS. `rt`는 다운로드를 돌릴 tokio 런타임.
     pub fn fs(&self, rt: tokio::runtime::Handle) -> Result<EbmsFs> {
         EbmsFs::new(

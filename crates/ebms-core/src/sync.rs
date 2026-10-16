@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use futures_util::{StreamExt, stream};
+use serde::Serialize;
 use tracing::{info, warn};
 
 use crate::api::Api;
@@ -151,6 +152,79 @@ async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncRepo
         report.pre_chunks_removed.push(id);
     }
     Ok(())
+}
+
+/// 다음 동기화에 받을 청크 용량. 동기화를 시작하기 전에 보여 준다.
+/// 사전 청크는 난이도표 태그를 함께 둬서 고르는 표를 바꿔 가며 다시 셀 수 있다.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct PendingDownload {
+    /// 아직 없거나 바뀐 차트 청크
+    pub chart_bytes: u64,
+    pub chart_chunks: u32,
+    /// 아직 없거나 바뀐 사전 청크(난이도표와 무관하게 전부)
+    pub pre: Vec<PendingPreChunk>,
+    /// 서버가 난이도표 태그를 줬음. 아니면 표를 골라도 전부 받는다([`sync_pre`]와 같다).
+    pub tables_known: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PendingPreChunk {
+    pub size: u64,
+    /// 이 청크에 곡이 있는 난이도표 id
+    pub tables: Vec<u32>,
+}
+
+impl PendingDownload {
+    /// 고른 난이도표(None이면 전곡)로 동기화하면 받을 사전 청크의 (바이트, 개수).
+    pub fn pre_for(&self, selected: Option<&[u32]>) -> (u64, u32) {
+        self.pre
+            .iter()
+            .filter(|c| match selected {
+                Some(sel) if self.tables_known => c.tables.iter().any(|t| sel.contains(t)),
+                _ => true,
+            })
+            .fold((0, 0), |(bytes, n), c| (bytes + c.size, n + 1))
+    }
+}
+
+/// 지금 동기화하면 받을 청크 용량을 센다. 로컬에 같은 해시의 파일이 있는 청크는 뺀다.
+/// 크기 API가 없는 이전 서버면 None.
+pub async fn pending_download(
+    api: &Api,
+    paths: &Paths,
+    index: &Index,
+) -> Result<Option<PendingDownload>> {
+    let Some(sizes) = api.chunk_sizes().await? else {
+        return Ok(None);
+    };
+    let mut out = PendingDownload::default();
+    let local = index.chunk_hashes(ChunkKind::Chart)?;
+    for (id, c) in &sizes.chart {
+        if !(local.get(id) == Some(&c.sha256) && paths.chart_chunk(*id, &c.sha256).exists()) {
+            out.chart_bytes += c.size;
+            out.chart_chunks += 1;
+        }
+    }
+    if sizes.asset.is_empty() {
+        return Ok(Some(out));
+    }
+    let tags = api.pre_tables().await?.map(|t| t.chunks);
+    out.tables_known = tags.is_some();
+    let local = index.chunk_hashes(ChunkKind::Pre)?;
+    for (id, c) in &sizes.asset {
+        if local.get(id) == Some(&c.sha256) && paths.pre_chunk(*id, &c.sha256).exists() {
+            continue;
+        }
+        let tables = tags
+            .as_ref()
+            .and_then(|t| t.get(id).cloned())
+            .unwrap_or_default();
+        out.pre.push(PendingPreChunk {
+            size: c.size,
+            tables,
+        });
+    }
+    Ok(Some(out))
 }
 
 /// 청크 폴더를 인덱스에 맞춘다. 해시 없는 이전 이름은 인덱스 판 이름으로 옮기고,

@@ -6,6 +6,7 @@ use std::time::Duration;
 use ebms_core::Error;
 use ebms_core::api::{DifficultyTable, Me};
 use ebms_core::hub::{LocalUsage, Server, SyncStatus};
+use ebms_core::sync::PendingDownload;
 use serde::Serialize;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
@@ -194,6 +195,17 @@ pub async fn set_pre_tables(
     server.set_pre_tables(selected.as_deref()).map_err(err)?;
     server.sync().await.map_err(err)?;
     Ok(server.sync_status())
+}
+
+/// 지금 동기화하면 받을 용량. 크기를 알려 주지 않는 이전 서버면 None.
+/// 사전 청크는 난이도표 태그와 함께 줘서 창에서 고르는 표에 맞춰 바로 다시 센다.
+#[tauri::command]
+pub async fn pending_download(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Option<PendingDownload>> {
+    let server = state.hub.server(&id).map_err(err)?;
+    server.client.pending_download().await.map_err(err)
 }
 
 /// 서버별 캐시 한도(GB).

@@ -98,6 +98,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             commands::sync_now,
             commands::pre_tables,
             commands::set_pre_tables,
+            commands::pending_download,
             commands::cache_limit_gb,
             commands::set_cache_limit_gb,
             commands::players,
