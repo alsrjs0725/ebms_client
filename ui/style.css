@@ -115,3 +115,13 @@ footer { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--line);
 
 .update footer { gap: 8px; }
 .update .notes { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+
+.personal-dialog h3 { font-size: 14px; margin: 16px 0 6px; }
+.personal-dialog .actions form { display: contents; }
+.personal-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.personal-table th { text-align: left; font-weight: 500; color: var(--muted); border-bottom: 1px solid var(--line); padding: 4px 6px; }
+.personal-table td { border-bottom: 1px solid var(--line); padding: 4px 6px; overflow-wrap: anywhere; vertical-align: middle; }
+.personal-table td:last-child { width: 1%; white-space: nowrap; }
+.personal-dialog .search { width: 100%; font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+.song-list { margin-left: 0; max-height: 200px; }
+.song-list label { display: block; overflow-wrap: anywhere; }

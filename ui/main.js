@@ -18,6 +18,9 @@ const INSECURE_TEXT = "암호화되지 않은 http 주소입니다. 세션키가
 const loggingIn = new Set();
 /** 사전 다운로드 범위 창에서 고르는 중인 서버 */
 let preServer = null;
+/** 개인 채보 창을 연 서버 */
+let personalServer = null;
+const SEARCH_DELAY_MS = 200;
 /** 사전 다운로드 범위 창에서 쓰는 받을 용량(`pending_download`). 계산 중이면 "loading", 모르면 null */
 let prePending = null;
 /** 서버 카드에 보여 줄 받을 용량. 서버 id → { key, at, value } */
@@ -176,6 +179,8 @@ function renderServer(s) {
   const preBtn = li.querySelector(".pre-tables");
   preBtn.hidden = s.login !== "logged_in";
   preBtn.addEventListener("click", () => run(preBtn, () => openPreDialog(s)));
+  const personalBtn = li.querySelector(".personal");
+  personalBtn.addEventListener("click", () => run(personalBtn, () => openPersonalDialog(s)));
 
   loginBtn.addEventListener("click", async () => {
     loggingIn.add(s.id);
@@ -339,6 +344,121 @@ $("pre-dialog").addEventListener("close", () => {
     .finally(() => refresh().catch(() => {}));
 });
 
+/** 개인 채보 창. 연결한 채보 표와, 곡을 찾아 채보를 연결하는 부분. */
+async function openPersonalDialog(s) {
+  personalServer = s.id;
+  $("personal-title").textContent = `개인 채보 · ${s.name}`;
+  $("personal-search").value = "";
+  $("personal-songs").replaceChildren();
+  $("personal-songs-empty").hidden = true;
+  $("personal-add").disabled = true;
+  await refreshPersonal();
+  $("personal-dialog").showModal();
+  $("personal-search").focus();
+}
+
+async function refreshPersonal() {
+  const id = personalServer;
+  if (!id) return;
+  const charts = await invoke("personal_charts", { id });
+  const rows = charts.map((c) => {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = c.name;
+    const song = document.createElement("td");
+    song.textContent = c.dir ?? `곡 ${c.song_id} (서버에 없음)`;
+    if (!c.dir) song.className = "muted";
+    const td = document.createElement("td");
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "빼기";
+    confirmClick(remove, "한 번 더", () =>
+      run(remove, async () => {
+        await invoke("remove_personal_chart", { id, songId: c.song_id, name: c.name });
+        await refreshPersonal();
+      }),
+    );
+    td.append(remove);
+    tr.append(name, song, td);
+    return tr;
+  });
+  $("personal-rows").replaceChildren(...rows);
+  $("personal-empty").hidden = charts.length > 0;
+}
+
+let searchTimer;
+let searchSeq = 0;
+$("personal-search").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(searchSongs, SEARCH_DELAY_MS);
+});
+
+async function searchSongs() {
+  const id = personalServer;
+  const query = $("personal-search").value.trim();
+  const seq = ++searchSeq;
+  $("personal-add").disabled = true;
+  const empty = $("personal-songs-empty");
+  if (!id || !query) {
+    $("personal-songs").replaceChildren();
+    empty.hidden = true;
+    return;
+  }
+  let hits;
+  try {
+    hits = await invoke("search_songs", { id, query });
+  } catch (e) {
+    showMessage(String(e));
+    return;
+  }
+  // 늦게 온 옛 검색 결과는 버린다.
+  if (seq !== searchSeq) return;
+  const items = hits.map((h) => {
+    const li = document.createElement("li");
+    const label = document.createElement("label");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "personal-song";
+    radio.value = String(h.song_id);
+    label.append(radio, ` ${h.dir}`);
+    li.append(label);
+    return li;
+  });
+  $("personal-songs").replaceChildren(...items);
+  empty.textContent = hits.length
+    ? hits.length >= 50
+      ? "결과가 많아 앞의 50곡만 보입니다. 더 자세히 검색해 주세요."
+      : ""
+    : "맞는 곡이 없습니다. 동기화가 끝났는지 확인해 주세요.";
+  empty.hidden = !empty.textContent;
+}
+
+$("personal-songs").addEventListener("change", () => {
+  $("personal-add").disabled = !$("personal-songs").querySelector("input:checked");
+});
+
+$("personal-add").addEventListener("click", () => {
+  const id = personalServer;
+  const picked = $("personal-songs").querySelector("input:checked");
+  if (!id || !picked) return;
+  const label = picked.parentElement.textContent.trim();
+  run($("personal-add"), async () => {
+    try {
+      const added = await invoke("add_personal_charts", { id, songId: Number(picked.value) });
+      if (added.length) {
+        showMessage(`${label}에 채보 ${added.length}개를 연결했습니다.`, "info");
+      }
+    } finally {
+      await refreshPersonal();
+    }
+  });
+});
+
+$("personal-dialog").addEventListener("close", () => {
+  personalServer = null;
+  refresh().catch(() => {});
+});
+
 async function refresh() {
   const servers = await invoke("list_servers");
   $("servers").replaceChildren(...servers.map(renderServer));
@@ -449,5 +569,5 @@ $("open-logs").addEventListener("click", () => run($("open-logs"), () => invoke(
 refresh().catch((e) => showMessage(String(e)));
 showLogPath().catch(() => {});
 setInterval(() => {
-  if (loggingIn.size === 0 && !preServer) refresh().catch(() => {});
+  if (loggingIn.size === 0 && !preServer && !personalServer) refresh().catch(() => {});
 }, REFRESH_MS);

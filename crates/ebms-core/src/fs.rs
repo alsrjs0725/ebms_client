@@ -217,7 +217,7 @@ enum Plan {
 }
 
 impl EbmsFs {
-    /// 차트, 사전 청크, 캐시에 있는 에셋은 바로 읽는다. 받아야 하면 [`Plan::Fetch`].
+    /// 차트, 사전 청크, 개인 채보, 캐시에 있는 에셋은 바로 읽는다. 받아야 하면 [`Plan::Fetch`].
     fn plan(&self, ino: Ino, offset: u64, size: u32) -> Result<Plan> {
         let Some((song, file_size, source)) = self.tree().file(ino) else {
             return Err(Error::Other(format!("not a file: {ino}")));
@@ -247,6 +247,9 @@ impl EbmsFs {
                 len,
             )
             .map(Plan::Done),
+            Source::Personal { sha256, ext } => {
+                read_at(&self.paths.personal_chart(&sha256, &ext), offset, len).map(Plan::Done)
+            }
             Source::Asset { entry, .. } => {
                 match self
                     .fetcher

@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use ebms_core::Error;
 use ebms_core::api::{DifficultyTable, Me};
-use ebms_core::hub::{LocalUsage, Server, SyncStatus};
+use ebms_core::hub::{LinkedChart, LocalUsage, Server, SongHit, SyncStatus};
+use ebms_core::personal::{PERSONAL_EXTS, PersonalChart};
 use ebms_core::sync::PendingDownload;
 use serde::Serialize;
 use tauri::State;
@@ -195,6 +196,81 @@ pub async fn set_pre_tables(
     server.set_pre_tables(selected.as_deref()).map_err(err)?;
     server.sync().await.map_err(err)?;
     Ok(server.sync_status())
+}
+
+/// 연결한 개인 채보 목록.
+#[tauri::command]
+pub async fn personal_charts(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<LinkedChart>> {
+    let server = state.hub.server(&id).map_err(err)?;
+    tokio::task::spawn_blocking(move || server.personal_charts())
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+/// 개인 채보를 연결할 곡 찾기.
+#[tauri::command]
+pub async fn search_songs(
+    state: State<'_, AppState>,
+    id: String,
+    query: String,
+) -> CmdResult<Vec<SongHit>> {
+    let server = state.hub.server(&id).map_err(err)?;
+    tokio::task::spawn_blocking(move || server.search_songs(&query))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+/// 파일 선택 창에서 채보를 골라(여러 개 가능) `song_id` 곡에 연결한다. 취소하면 빈 목록.
+/// 서버에는 올리지 않고, 가상 드라이브의 그 곡 폴더에 바로 보인다.
+#[tauri::command]
+pub async fn add_personal_charts(
+    state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+    id: String,
+    song_id: u32,
+) -> CmdResult<Vec<PersonalChart>> {
+    let server = state.hub.server(&id).map_err(err)?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_title("개인 채보 선택")
+        .set_parent(&window)
+        .add_filter("BMS 채보", PERSONAL_EXTS)
+        .pick_files(move |files| {
+            let _ = tx.send(files);
+        });
+    let Some(files) = rx.await.map_err(err)? else {
+        return Ok(Vec::new());
+    };
+    let files = files
+        .into_iter()
+        .map(|f| f.into_path().map_err(err))
+        .collect::<CmdResult<Vec<_>>>()?;
+    server
+        .add_personal_charts(song_id, files)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_personal_chart(
+    state: State<'_, AppState>,
+    id: String,
+    song_id: u32,
+    name: String,
+) -> CmdResult<()> {
+    let server = state.hub.server(&id).map_err(err)?;
+    server
+        .remove_personal_chart(song_id, name)
+        .await
+        .map_err(err)?;
+    Ok(())
 }
 
 /// 지금 동기화하면 받을 용량. 크기를 알려 주지 않는 이전 서버면 None.

@@ -14,6 +14,7 @@ use tracing::warn;
 use crate::Result;
 use crate::index::{ChartRow, Index, PreRow};
 use crate::manifest::{FileEntry, SongManifest};
+use crate::personal::PersonalChart;
 
 pub type Ino = u64;
 pub const ROOT: Ino = 1;
@@ -41,6 +42,8 @@ pub enum Source {
         chunk_sha256: Arc<str>,
         data_offset: u64,
     },
+    /// 사용자가 곡에 연결한 개인 채보의 로컬 복사본.
+    Personal { sha256: Arc<str>, ext: Arc<str> },
     /// 곡 zip 안의 파일. 처음 읽을 때 받는다.
     Asset { song_id: u32, entry: Arc<FileEntry> },
 }
@@ -71,6 +74,10 @@ pub trait SongSource: Send + Sync {
     fn pre_files(&self, _song_id: u32) -> Result<Vec<PreRow>> {
         Ok(Vec::new())
     }
+    /// 곡에 연결한 개인 채보.
+    fn personal(&self, _song_id: u32) -> Result<Vec<PersonalChart>> {
+        Ok(Vec::new())
+    }
 }
 
 impl SongSource for Index {
@@ -84,6 +91,10 @@ impl SongSource for Index {
 
     fn pre_files(&self, song_id: u32) -> Result<Vec<PreRow>> {
         Index::pre_files(self, song_id)
+    }
+
+    fn personal(&self, song_id: u32) -> Result<Vec<PersonalChart>> {
+        self.personal_for_song(song_id)
     }
 }
 
@@ -200,11 +211,13 @@ impl Tree {
             };
             let charts = self.source.charts(&song.charts)?;
             let pre = self.source.pre_files(song_id)?;
+            let personal = self.source.personal(song_id)?;
             Ok::<_, crate::Error>(Some(SongTree::build(
                 &song,
                 &self.root[pos].name,
                 charts,
                 pre,
+                personal,
             )))
         })();
         match loaded {
@@ -417,7 +430,13 @@ struct SongTree {
 }
 
 impl SongTree {
-    fn build(song: &SongManifest, dir_name: &str, charts: Vec<ChartRow>, pre: Vec<PreRow>) -> Self {
+    fn build(
+        song: &SongManifest,
+        dir_name: &str,
+        charts: Vec<ChartRow>,
+        pre: Vec<PreRow>,
+        personal: Vec<PersonalChart>,
+    ) -> Self {
         let files: Vec<Arc<FileEntry>> = song.files.iter().cloned().map(Arc::new).collect();
         let mut b = Builder {
             nodes: vec![SongNode {
@@ -433,6 +452,8 @@ impl SongTree {
         // 이 곡의 로컬 차트를 (size, crc32)로 찾는다. 서버 #10 반영 전 임시 매핑.
         let mut unmatched = charts;
         let pre: HashMap<String, PreRow> = pre.into_iter().map(|p| (p.path.clone(), p)).collect();
+        // 곡 zip의 차트가 든 폴더. 개인 채보를 여기에 둬야 키음·BGA 상대 경로가 맞는다.
+        let mut chart_dir = None;
 
         for entry in &files {
             let parts: Vec<&str> = entry.path.split('/').filter(|p| !p.is_empty()).collect();
@@ -447,6 +468,9 @@ impl SongTree {
                 parent = parent.and_then(|p| b.dir(p, &entry_name(d)));
             }
             let Some(parent) = parent else { continue };
+            if chart_dir.is_none() && crate::is_chart_path(&entry.path) {
+                chart_dir = Some(parent);
+            }
 
             let mut source = Source::Asset {
                 song_id: song.song_id,
@@ -489,6 +513,20 @@ impl SongTree {
                     chunk_id: c.chunk_id,
                     chunk_sha256: c.chunk_sha256.as_str().into(),
                     data_offset: c.data_offset,
+                },
+            );
+        }
+
+        // 개인 채보는 곡 파일 다음에 더한다. 그래야 곡 파일의 이름과 ino가 바뀌지 않는다.
+        let chart_dir = chart_dir.unwrap_or(0);
+        for p in personal {
+            b.file(
+                chart_dir,
+                &entry_name(&p.name),
+                p.size,
+                Source::Personal {
+                    sha256: p.sha256.into(),
+                    ext: p.ext.into(),
                 },
             );
         }
@@ -719,6 +757,7 @@ mod tests {
     struct Mem {
         songs: Vec<SongManifest>,
         charts: HashMap<String, ChartRow>,
+        personal: Vec<PersonalChart>,
         loads: std::sync::atomic::AtomicUsize,
     }
 
@@ -733,6 +772,15 @@ mod tests {
             Ok(sha256
                 .iter()
                 .filter_map(|s| self.charts.get(s).cloned())
+                .collect())
+        }
+
+        fn personal(&self, song_id: u32) -> Result<Vec<PersonalChart>> {
+            Ok(self
+                .personal
+                .iter()
+                .filter(|p| p.song_id == song_id)
+                .cloned()
                 .collect())
         }
     }
@@ -804,6 +852,64 @@ mod tests {
         );
         assert!(tree.resolve("00007 Artist - Title_/missing").is_none());
         assert!(tree.get(song | 999).is_none());
+    }
+
+    fn personal(song_id: u32, name: &str, size: u64) -> PersonalChart {
+        PersonalChart {
+            song_id,
+            name: name.into(),
+            sha256: "p".repeat(64),
+            ext: "bme".into(),
+            size,
+            added_at: 0,
+        }
+    }
+
+    #[test]
+    fn personal_charts_join_song_folder() {
+        let p = "00007 Artist - Title_/bgm01.ogg";
+        let before = tree(sample()).0.resolve(p);
+        let mut mem = sample();
+        mem.personal = vec![
+            personal(7, "my_another.bme", 42),
+            // zip 파일과 겹치면 번호를 붙이고, 쓸 수 없는 이름은 바꾼다.
+            personal(7, "_7A.bme", 5),
+            personal(7, "con.bms", 6),
+            personal(8, "other.bme", 1),
+        ];
+        let (tree, _) = tree(mem);
+        // 곡 파일의 ino는 그대로
+        assert_eq!(tree.resolve(p), before);
+        let mine = tree
+            .resolve("00007 Artist - Title_/my_another.bme")
+            .expect("personal chart");
+        assert!(matches!(
+            tree.file(mine),
+            Some((_, 42, Source::Personal { .. }))
+        ));
+        let dup = tree.resolve("00007 Artist - Title_/_7A (2).bme").unwrap();
+        assert_eq!(tree.file(dup).unwrap().1, 5);
+        assert!(tree.resolve("00007 Artist - Title_/_con.bms").is_some());
+        assert!(tree.resolve("00007 Artist - Title_/other.bme").is_none());
+    }
+
+    #[test]
+    fn personal_charts_go_next_to_song_charts() {
+        let songs = vec![SongManifest {
+            song_id: 1,
+            folder: "s".into(),
+            zip_size: 0,
+            zip_sha256: String::new(),
+            charts: vec![],
+            files: vec![entry("pack/bgm.ogg", 1, 1), entry("pack/a.bms", 2, 2)],
+        }];
+        let (tree, _) = tree(Mem {
+            songs,
+            personal: vec![personal(1, "mine.bms", 3)],
+            ..Default::default()
+        });
+        assert!(tree.resolve("00001 s/pack/mine.bms").is_some());
+        assert!(tree.resolve("00001 s/mine.bms").is_none());
     }
 
     #[test]
