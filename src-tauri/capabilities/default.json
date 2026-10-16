@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "설정 창, 공지 창, 업데이트 창",
-  "windows": ["settings", "notices", "update"],
+  "description": "설정 창, 공지 창, 업데이트 창, 개발자 도구 창",
+  "windows": ["settings", "notices", "update", "devtools"],
   "permissions": ["core:default"]
 }

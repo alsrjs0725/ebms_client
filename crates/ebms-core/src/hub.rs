@@ -17,6 +17,7 @@ use crate::auth::LoginRequest;
 use crate::config::{AppDir, Config, ServerEntry, is_insecure_url, normalize_url};
 use crate::drive::Drive;
 use crate::fs::EbmsFs;
+use crate::openlog::OpenLog;
 use crate::personal::PersonalChart;
 use crate::players::Players;
 use crate::session::SessionStore;
@@ -281,6 +282,8 @@ pub struct Hub {
     drive: Arc<Drive>,
     /// 마운트한 드라이브가 보는 구동기 목록. 설정을 바꾸면 같이 바꾼다.
     players: Players,
+    /// 개발자 도구에 보여줄 파일 열기 기록
+    open_log: OpenLog,
     state: Mutex<State>,
 }
 
@@ -296,6 +299,7 @@ impl Hub {
             rt,
             drive: Arc::new(Drive::new()),
             players: Players::new(config.players()),
+            open_log: OpenLog::default(),
             state: Mutex::new(State {
                 config: config.clone(),
                 servers: BTreeMap::new(),
@@ -346,6 +350,11 @@ impl Hub {
     /// 곡 전체를 받을 수 있는 프로그램. 마운트에 넘기면 설정을 바꿀 때 바로 따라간다.
     pub fn players(&self) -> Players {
         self.players.clone()
+    }
+
+    /// 가상 드라이브의 파일 열기 기록. 개발자 도구 창이 떠 있을 때만 쌓인다.
+    pub fn open_log(&self) -> OpenLog {
+        self.open_log.clone()
     }
 
     /// 설정을 바꿔 저장한다.

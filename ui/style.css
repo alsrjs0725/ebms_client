@@ -125,3 +125,15 @@ footer { margin-top: 28px; padding-top: 12px; border-top: 1px solid var(--line);
 .personal-dialog .search { width: 100%; font: inherit; padding: 5px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
 .song-list { margin-left: 0; max-height: 200px; }
 .song-list label { display: block; overflow-wrap: anywhere; }
+
+/* 개발자 도구 창 */
+body.devtools { padding: 12px; }
+.devtools-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.devtools-bar input[type="search"] { flex: 1; min-width: 160px; }
+.devtools-note { margin: 6px 0 10px; font-size: 12px; }
+.opens { width: 100%; border-collapse: collapse; font: 12px/1.4 ui-monospace, Consolas, monospace; table-layout: fixed; }
+.opens th, .opens td { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opens th { position: sticky; top: 0; background: var(--bg); }
+.opens th:nth-child(1) { width: 100px; }
+.opens th:nth-child(2) { width: 180px; }
+.opens th:nth-child(4) { width: 80px; }
