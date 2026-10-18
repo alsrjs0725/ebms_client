@@ -271,6 +271,8 @@ impl AsyncFileSystemContext for WinFs {
                 }
                 // 이미 로그를 남겼다. 다른 프로그램에는 권한 없음으로 보인다.
                 Err(Error::NotPlayer { .. }) => Err(STATUS_ACCESS_DENIED.into()),
+                // Qwilight 미리듣기 로드. Qwilight는 못 읽은 키음·BGA를 건너뛴다.
+                Err(Error::PreviewOnly) => Err(STATUS_ACCESS_DENIED.into()),
                 Err(e) => {
                     warn!(ino, %e, "read failed");
                     Err(STATUS_UNEXPECTED_IO_ERROR.into())

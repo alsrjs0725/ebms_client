@@ -123,6 +123,7 @@ mod tests {
             zip_sha256: String::new(),
             charts: vec![],
             files: vec![],
+            preview: None,
         };
         index.replace_manifest_chunk(0, "m", &[song]).unwrap();
         (dir, paths, index)
@@ -185,6 +186,7 @@ mod tests {
             zip_sha256: String::new(),
             charts: vec![],
             files: vec![],
+            preview: None,
         };
         index.replace_manifest_chunk(1, "m2", &[song]).unwrap();
         let src = dir.path().join("x.bms");

@@ -9,6 +9,35 @@ pub struct SongManifest {
     pub zip_sha256: String,
     pub charts: Vec<String>,
     pub files: Vec<FileEntry>,
+    /// 서버가 만든 미리듣기 음원. 곡 zip에 없는 사전 파일이다(서버 #131).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<PreviewEntry>,
+}
+
+/// 서버가 차트의 키음을 섞어 만든 미리듣기 음원. 사전 청크(`{song_id}/{path}`)나
+/// `/api/pre/song/{id}/file?path=`로 받는다.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewEntry {
+    /// 곡 폴더 안 경로 (예: `preview_ebms.ogg`)
+    pub path: String,
+    pub size: u64,
+    /// hex 문자열
+    pub crc32: String,
+}
+
+impl PreviewEntry {
+    /// 사전 API로 받을 때 쓰는 파일 항목. 곡 zip에 없으므로 오프셋은 곡 zip 항목과 겹치지 않는 값.
+    pub fn file_entry(&self) -> FileEntry {
+        FileEntry {
+            path: self.path.clone(),
+            size: self.size,
+            offset: u64::MAX,
+            comp_size: self.size,
+            crc32: self.crc32.clone(),
+            method: 0,
+            kind: FileKind::Pre,
+        }
+    }
 }
 
 /// 곡 zip 안의 파일 하나.

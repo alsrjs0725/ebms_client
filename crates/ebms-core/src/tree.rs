@@ -13,7 +13,7 @@ use tracing::warn;
 
 use crate::Result;
 use crate::index::{ChartRow, Index, PreRow};
-use crate::manifest::{FileEntry, SongManifest};
+use crate::manifest::{FileEntry, FileKind, PreviewEntry, SongManifest};
 use crate::personal::PersonalChart;
 
 pub type Ino = u64;
@@ -26,6 +26,8 @@ const NODE_MASK: Ino = (1 << NODE_BITS) - 1;
 const MAX_SONG_KEY: Ino = (1 << (48 - NODE_BITS)) - 1;
 /// 파일 목록을 메모리에 두는 곡 수.
 pub const SONG_CACHE: usize = 256;
+/// 서버가 오디오로 보는 확장자 (소문자).
+const AUDIO_EXTS: &[&str] = &["wav", "ogg", "mp3", "flac"];
 
 /// 파일 내용을 어디서 읽는지.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -329,6 +331,27 @@ impl Tree {
         }
     }
 
+    /// 미리듣기 음원(사전 파일인 오디오: 서버가 만든 미리듣기, `#PREVIEW`, `preview*`)인지.
+    /// 서버는 미리듣기 오디오만 사전 파일로 정한다.
+    pub fn is_preview_audio(&self, ino: Ino) -> bool {
+        let Some((song, idx)) = self.node(ino) else {
+            return false;
+        };
+        let node = &song.nodes[idx];
+        let pre = match &node.kind {
+            Kind::File {
+                source: Source::Pre { .. },
+                ..
+            } => true,
+            Kind::File {
+                source: Source::Asset { entry, .. },
+                ..
+            } => entry.kind == FileKind::Pre,
+            _ => false,
+        };
+        pre && crate::extension(&node.name).is_some_and(|e| AUDIO_EXTS.contains(&e.as_str()))
+    }
+
     /// `/`로 구분한 경로로 찾는다. 빈 문자열은 루트.
     pub fn resolve(&self, path: &str) -> Option<Ino> {
         let mut ino = ROOT;
@@ -531,6 +554,12 @@ impl SongTree {
             );
         }
 
+        // 서버가 만든 미리듣기(곡 zip에 없는 사전 파일). 곡 파일·개인 채보 다음에 더해 그 ino를 바꾸지 않는다.
+        // 같은 이름의 파일이 있으면 보이지 않는다.
+        if let Some(preview) = &song.preview {
+            b.preview(song.song_id, preview, &pre);
+        }
+
         let mut nodes = b.nodes;
         // 자식을 이름순으로. 이름은 노드에 있으므로 잠시 꺼내 정렬한다.
         for i in 0..nodes.len() {
@@ -616,6 +645,40 @@ impl Builder {
     fn file(&mut self, parent: u32, name: &str, size: u64, source: Source) {
         let name = self.free_name(parent, name);
         self.add(parent, name, Kind::File { size, source });
+    }
+
+    fn preview(&mut self, song_id: u32, preview: &PreviewEntry, pre: &HashMap<String, PreRow>) {
+        let parts: Vec<&str> = preview.path.split('/').filter(|p| !p.is_empty()).collect();
+        let Some((file_name, dirs)) = parts.split_last() else {
+            return;
+        };
+        if parts.iter().any(|p| *p == "." || *p == "..") {
+            return;
+        }
+        let mut parent = Some(0);
+        for d in dirs {
+            parent = parent.and_then(|p| self.dir(p, &entry_name(d)));
+        }
+        let Some(parent) = parent else { return };
+        let name = entry_name(file_name);
+        if self.names.contains_key(&(parent, fold(&name))) {
+            return;
+        }
+        let entry = preview.file_entry();
+        let source = match pre.get(&preview.path) {
+            Some(p) if p.size == entry.size && Some(p.crc32) == entry.crc32_value() => {
+                Source::Pre {
+                    chunk_id: p.chunk_id,
+                    chunk_sha256: p.chunk_sha256.as_str().into(),
+                    data_offset: p.data_offset,
+                }
+            }
+            _ => Source::Asset {
+                song_id,
+                entry: Arc::new(entry),
+            },
+        };
+        self.file(parent, &name, preview.size, source);
     }
 
     /// `parent` 안에서 대소문자를 무시해도 겹치지 않는 이름.
@@ -758,6 +821,7 @@ mod tests {
         songs: Vec<SongManifest>,
         charts: HashMap<String, ChartRow>,
         personal: Vec<PersonalChart>,
+        pre: Vec<PreRow>,
         loads: std::sync::atomic::AtomicUsize,
     }
 
@@ -772,6 +836,15 @@ mod tests {
             Ok(sha256
                 .iter()
                 .filter_map(|s| self.charts.get(s).cloned())
+                .collect())
+        }
+
+        fn pre_files(&self, song_id: u32) -> Result<Vec<PreRow>> {
+            Ok(self
+                .pre
+                .iter()
+                .filter(|p| p.song_id == song_id)
+                .cloned()
                 .collect())
         }
 
@@ -809,6 +882,7 @@ mod tests {
                 entry("bgm01.ogg", 20, 2),
                 entry("bga/movie.mp4", 30, 3),
             ],
+            preview: None,
         }];
         let charts = HashMap::from([(a.clone(), chart(&a, 10, 1)), (b.clone(), chart(&b, 11, 9))]);
         Mem {
@@ -852,6 +926,79 @@ mod tests {
         );
         assert!(tree.resolve("00007 Artist - Title_/missing").is_none());
         assert!(tree.get(song | 999).is_none());
+    }
+
+    fn with_preview(path: &str) -> Mem {
+        let mut mem = sample();
+        mem.songs[0].preview = Some(PreviewEntry {
+            path: path.into(),
+            size: 300,
+            crc32: "0000abcd".into(),
+        });
+        mem
+    }
+
+    #[test]
+    fn server_preview_joins_song_folder() {
+        let p = "00007 Artist - Title_/bgm01.ogg";
+        let before = tree(sample()).0.resolve(p);
+        let (t, _) = tree(with_preview("preview_ebms.ogg"));
+        // 곡 파일의 ino는 그대로
+        assert_eq!(t.resolve(p), before);
+        let ino = t.resolve("00007 Artist - Title_/preview_ebms.ogg").unwrap();
+        let Some((info, 300, Source::Asset { entry, .. })) = t.file(ino) else {
+            panic!("preview not fetched from the pre API");
+        };
+        assert_eq!(entry.kind, FileKind::Pre);
+        assert_eq!(entry.crc32_value(), Some(0xabcd));
+        // 곡 zip 다운로드 검증에는 쓰지 않는다.
+        assert!(info.files.iter().all(|f| f.path != "preview_ebms.ogg"));
+        assert!(t.is_preview_audio(ino));
+        // 플레이 파일인 오디오는 미리듣기가 아니다.
+        let mut mem = with_preview("preview_ebms.ogg");
+        mem.songs[0].files[1].kind = FileKind::Play;
+        let (t2, _) = tree(mem);
+        assert!(!t2.is_preview_audio(t2.resolve(p).unwrap()));
+
+        // 사전 청크에 있으면 거기서 읽는다.
+        let mut mem = with_preview("preview_ebms.ogg");
+        mem.pre = vec![PreRow {
+            song_id: 7,
+            path: "preview_ebms.ogg".into(),
+            size: 300,
+            crc32: 0xabcd,
+            chunk_id: 0,
+            chunk_sha256: "c".repeat(64),
+            data_offset: 40,
+        }];
+        let (t, _) = tree(mem);
+        let ino = t.resolve("00007 Artist - Title_/preview_ebms.ogg").unwrap();
+        assert!(matches!(
+            t.file(ino),
+            Some((
+                _,
+                300,
+                Source::Pre {
+                    data_offset: 40,
+                    ..
+                }
+            ))
+        ));
+        assert!(t.is_preview_audio(ino));
+    }
+
+    #[test]
+    fn server_preview_never_hides_song_file() {
+        let (t, _) = tree(with_preview("BGM01.ogg"));
+        let ino = t.resolve("00007 Artist - Title_/bgm01.ogg").unwrap();
+        assert!(matches!(t.file(ino), Some((_, 20, _))));
+        assert!(t.resolve("00007 Artist - Title_/BGM01 (2).ogg").is_none());
+        // 폴더 안 경로도 그대로 만든다.
+        let (t, _) = tree(with_preview("sub/preview_ebms.ogg"));
+        assert!(
+            t.resolve("00007 Artist - Title_/sub/preview_ebms.ogg")
+                .is_some()
+        );
     }
 
     fn personal(song_id: u32, name: &str, size: u64) -> PersonalChart {
@@ -902,6 +1049,7 @@ mod tests {
             zip_sha256: String::new(),
             charts: vec![],
             files: vec![entry("pack/bgm.ogg", 1, 1), entry("pack/a.bms", 2, 2)],
+            preview: None,
         }];
         let (tree, _) = tree(Mem {
             songs,
@@ -960,6 +1108,7 @@ mod tests {
                 zip_sha256: String::new(),
                 charts: vec![],
                 files: vec![entry("a.ogg", 1, 0)],
+                preview: None,
             })
             .collect();
         let (tree, mem) = tree(Mem {
@@ -990,6 +1139,7 @@ mod tests {
                 zip_sha256: String::new(),
                 charts: vec![],
                 files: vec![entry("a.ogg", 1, 0)],
+                preview: None,
             })
             .collect();
         let (tree, mem) = tree(Mem {
@@ -1068,6 +1218,7 @@ mod tests {
                 entry("Sub/1.ogg", 7, 7),
                 entry("sub/2.ogg", 8, 8),
             ],
+            preview: None,
         }];
         let (tree, _) = tree(Mem {
             songs,

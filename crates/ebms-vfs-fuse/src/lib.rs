@@ -154,7 +154,7 @@ impl Filesystem for FuseFs {
             Box::new(move |result| match result {
                 Ok(data) => reply.data(&data),
                 // 이미 로그를 남겼다. 다른 프로그램에는 권한 없음으로 보인다.
-                Err(Error::NotPlayer { .. }) => reply.error(Errno::EACCES),
+                Err(Error::NotPlayer { .. } | Error::PreviewOnly) => reply.error(Errno::EACCES),
                 Err(e) => {
                     warn!(ino, %e, "read failed");
                     reply.error(Errno::EIO);

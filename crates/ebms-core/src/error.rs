@@ -23,6 +23,9 @@ pub enum Error {
     /// 구동기가 아닌 프로그램이 받지 않은 플레이 파일을 읽음. 티켓을 쓰지 않고 거절한다.
     #[error("{program} is not a BMS player, play download refused")]
     NotPlayer { program: String },
+    /// Qwilight 미리듣기 로드가 읽은 플레이 파일. 받지 않고(티켓을 쓰지 않고) 거절한다([`crate::preview`]).
+    #[error("play file read while previewing, not downloaded")]
+    PreviewOnly,
     #[error("login failed: {0}")]
     Auth(String),
     #[error("config: {0}")]

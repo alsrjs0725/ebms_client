@@ -48,6 +48,11 @@ pub fn is_player(players: &[String], exe: Option<&str>, args: &[String]) -> bool
         .any(matches)
 }
 
+/// 실행 파일이 Qwilight인지. Qwilight는 미리듣기 때도 키음·BGA를 모두 읽는다([`crate::preview`]).
+pub fn is_qwilight(exe: &str) -> bool {
+    file_name(exe).to_lowercase().starts_with("qwilight")
+}
+
 fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
@@ -175,5 +180,12 @@ mod tests {
         p.push(r"D:\Games\Game.exe".into());
         players.clone().set(p);
         assert!(players.is_player(exe, &[]));
+    }
+
+    #[test]
+    fn qwilight_by_exe_name() {
+        assert!(is_qwilight(r"C:\Games\Qwilight\Qwilight.exe"));
+        assert!(is_qwilight("qwilight"));
+        assert!(!is_qwilight(r"C:\Qwilight\beatoraja.exe"));
     }
 }
