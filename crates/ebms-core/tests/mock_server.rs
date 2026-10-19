@@ -484,6 +484,7 @@ fn server_state() -> (AppState, Fixture) {
         // chart_b는 곡 zip에 없는, 나중에 연결된 차트
         charts: vec![sha_a.clone(), sha_b.clone()],
         files: entries(&zip),
+        preview: None,
     }];
 
     let mut server = Server {
@@ -1502,4 +1503,61 @@ fn pending_download_counts_only_missing_chunks_for_selected_tables() {
     assert_eq!((p.chart_bytes, p.chart_chunks), (0, 0));
     assert_eq!(p.pre_for(Some(&[1])), (0, 0));
     assert_eq!(p.pre_for(None), (pre1, 1));
+}
+
+/// Qwilight. 미리듣기 때도 키음·BGA를 모두 읽는다.
+struct Qwilight;
+
+impl Caller for Qwilight {
+    fn name(&self) -> String {
+        "Qwilight.exe".into()
+    }
+    fn is_player(&self) -> bool {
+        true
+    }
+    fn is_qwilight(&self) -> bool {
+        true
+    }
+}
+
+#[test]
+fn qwilight_preview_does_not_download_the_song() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    let c = &env.state.counters;
+
+    // preview 음원을 읽은 직후의 키음·BGA 읽기는 받지 않는다.
+    assert_eq!(
+        read_all_as(&fs, &format!("{SONG}/preview.ogg"), &Qwilight).unwrap(),
+        env.want("preview.ogg")
+    );
+    for path in ["bgm01.wav", "bga/movie.mp4"] {
+        let err = read_all_as(&fs, &format!("{SONG}/{path}"), &Qwilight).unwrap_err();
+        assert!(matches!(err, Error::PreviewOnly), "{err}");
+    }
+    assert_eq!(c.play.load(Ordering::SeqCst), 0);
+    assert_eq!(env.state.server().tickets, 5);
+
+    // 플레이를 시작하면 Qwilight가 같은 파일을 처음부터 다시 읽는다. 그때는 받는다.
+    std::thread::sleep(ebms_core::preview::REPLAY);
+    read_all_as(&fs, &format!("{SONG}/bgm01.wav"), &Qwilight).unwrap();
+    assert_eq!(
+        read_all_as(&fs, &format!("{SONG}/bga/movie.mp4"), &Qwilight).unwrap(),
+        env.want("bga/movie.mp4")
+    );
+    assert_eq!(c.play.load(Ordering::SeqCst), 1);
+    assert_eq!(env.state.server().tickets, 4);
+}
+
+#[test]
+fn other_players_ignore_qwilight_preview_rule() {
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+
+    // beatoraja 등은 preview를 읽은 직후 플레이를 시작해도 곡을 받는다.
+    read_all(&fs, &format!("{SONG}/preview.ogg")).unwrap();
+    read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap();
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
 }

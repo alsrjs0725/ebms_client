@@ -46,6 +46,12 @@ impl Caller for ProcessCaller {
         let (exe, args) = self.info();
         self.players.is_player(exe.as_deref(), &args)
     }
+
+    fn is_qwilight(&self) -> bool {
+        Process::open(self.pid)
+            .and_then(|p| p.exe())
+            .is_some_and(|exe| ebms_core::players::is_qwilight(&exe))
+    }
 }
 
 /// 프로세스 실행 파일 경로. 개발자 도구의 파일 열기 기록에 쓴다.

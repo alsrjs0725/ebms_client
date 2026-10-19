@@ -428,6 +428,7 @@ mod tests {
             zip_sha256: zip_sha256.into(),
             charts: vec![],
             files: vec![],
+            preview: None,
         }
     }
 

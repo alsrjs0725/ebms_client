@@ -13,6 +13,7 @@
 //! - [`fs`]: OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템
 //! - [`drive`]: 여러 서버를 서버별 최상위 폴더로 합친 가상 드라이브
 //! - [`players`]: BMS 구동기 판별. 곡 전체 다운로드는 구동기만 일으킨다
+//! - [`preview`]: Qwilight 미리듣기 동안 플레이 파일을 받지 않기
 //! - [`openlog`]: 개발자 도구에 보여줄 파일 열기 기록 (메모리에만)
 //! - [`hub`]: 등록된 서버 전체 (추가·삭제, 로그인, 동기화). 상주 앱이 쓴다
 //! - [`notice`]: 서버 공지. 상주 앱이 켜질 때 아직 확인하지 않은 공지를 띄운다
@@ -35,6 +36,7 @@ pub mod openlog;
 pub mod paths;
 pub mod personal;
 pub mod players;
+pub mod preview;
 pub mod session;
 pub mod sync;
 pub mod tree;

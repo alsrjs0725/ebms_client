@@ -6,13 +6,15 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use tokio::runtime::Handle;
 
 use crate::fetch::Fetcher;
 use crate::index::Index;
-use crate::manifest::FileEntry;
+use crate::manifest::{FileEntry, FileKind};
 use crate::paths::Paths;
+use crate::preview::PreviewGate;
 use crate::tree::{Ino, ROOT, SongInfo, Source, Stat, Tree};
 use crate::{Error, Result};
 
@@ -43,6 +45,10 @@ pub trait Caller: Send + Sync {
     /// BMS 구동기인지. 구동기만 곡 전체 다운로드를 일으킬 수 있다.
     /// 백업·인덱서·썸네일러가 플레이 파일을 몇 바이트 읽는 것만으로 티켓을 쓰지 않도록.
     fn is_player(&self) -> bool;
+    /// Qwilight인지. Qwilight는 미리듣기 때도 키음·BGA를 모두 읽으므로 그 읽기는 받지 않는다([`crate::preview`]).
+    fn is_qwilight(&self) -> bool {
+        false
+    }
 }
 
 /// CLI `cat`처럼 사용자가 직접 요청한 읽기. 구동기로 취급한다.
@@ -113,6 +119,7 @@ pub struct EbmsFs {
     fetcher: Arc<Fetcher>,
     paths: Paths,
     rt: Handle,
+    preview: PreviewGate,
 }
 
 impl EbmsFs {
@@ -124,6 +131,7 @@ impl EbmsFs {
             fetcher,
             paths,
             rt,
+            preview: PreviewGate::default(),
         })
     }
 
@@ -168,7 +176,7 @@ impl ReadOnlyFs for EbmsFs {
     }
 
     fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>> {
-        match self.plan(ino, offset, size)? {
+        match self.plan(ino, offset, size, caller)? {
             Plan::Done(data) => Ok(data),
             Plan::Fetch { song, entry, len } => {
                 let fetcher = self.fetcher.clone();
@@ -188,7 +196,7 @@ impl ReadOnlyFs for EbmsFs {
         caller: Box<dyn Caller>,
         done: ReadDone,
     ) {
-        let (song, entry, len) = match self.plan(ino, offset, size) {
+        let (song, entry, len) = match self.plan(ino, offset, size, &*caller) {
             Ok(Plan::Fetch { song, entry, len }) => (song, entry, len),
             Ok(Plan::Done(data)) => return done(Ok(data)),
             Err(e) => return done(Err(e)),
@@ -218,10 +226,15 @@ enum Plan {
 
 impl EbmsFs {
     /// 차트, 사전 청크, 개인 채보, 캐시에 있는 에셋은 바로 읽는다. 받아야 하면 [`Plan::Fetch`].
-    fn plan(&self, ino: Ino, offset: u64, size: u32) -> Result<Plan> {
-        let Some((song, file_size, source)) = self.tree().file(ino) else {
+    /// Qwilight 미리듣기 로드가 읽는 플레이 파일은 받지 않고 [`Error::PreviewOnly`].
+    fn plan(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Plan> {
+        let tree = self.tree();
+        let Some((song, file_size, source)) = tree.file(ino) else {
             return Err(Error::Other(format!("not a file: {ino}")));
         };
+        if offset == 0 && tree.is_preview_audio(ino) && caller.is_qwilight() {
+            self.preview.opened(song.song_id, Instant::now());
+        }
         if offset >= file_size {
             return Ok(Plan::Done(Vec::new()));
         }
@@ -257,6 +270,18 @@ impl EbmsFs {
                     .get(song.song_id, &entry.path, entry.size)?
                 {
                     Some(path) => read_at(&path, offset, len).map(Plan::Done),
+                    None if entry.kind == FileKind::Play
+                        && self.preview.previewing(song.song_id)
+                        && caller.is_qwilight()
+                        && self.preview.refuse(
+                            song.song_id,
+                            &entry.path,
+                            offset,
+                            Instant::now(),
+                        ) =>
+                    {
+                        Err(Error::PreviewOnly)
+                    }
                     None => Ok(Plan::Fetch { song, entry, len }),
                 }
             }
