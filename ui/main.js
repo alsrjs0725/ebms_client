@@ -571,3 +571,10 @@ showLogPath().catch(() => {});
 setInterval(() => {
   if (loggingIn.size === 0 && !preServer && !personalServer) refresh().catch(() => {});
 }, REFRESH_MS);
+
+// 숨은 개발자 도구. 화면에 여는 버튼은 없다.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "F12") return;
+  e.preventDefault();
+  invoke("open_devtools").catch(() => {});
+});

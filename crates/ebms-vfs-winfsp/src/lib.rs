@@ -18,6 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ebms_core::Error;
 use ebms_core::fs::{Attr, Kind, ReadOnlyFs};
+use ebms_core::openlog::OpenLog;
 use ebms_core::players::Players;
 use ebms_core::tree::{Ino, ROOT};
 use tokio::sync::{oneshot, watch};
@@ -54,6 +55,8 @@ struct WinFs {
     fs: Arc<dyn ReadOnlyFs>,
     /// 곡 전체를 받을 수 있는 프로그램 이름 ([`ebms_core::players`])
     players: Players,
+    /// 개발자 도구의 파일 열기 기록
+    open_log: OpenLog,
     rt: tokio::runtime::Handle,
     /// 모든 파일·폴더에 쓰는 보안 설명자
     security: Vec<u8>,
@@ -183,6 +186,12 @@ impl FileSystemContext for WinFs {
         self.fill(file_info.as_mut(), attr);
         // SAFETY: Open 요청을 처리하는 중이다 (요청 정보는 이 스레드에 있다).
         let pid = unsafe { winfsp_sys::FspFileSystemOperationProcessIdF() };
+        if attr.kind == Kind::File {
+            self.open_log
+                .record(file_name.to_string_lossy(), attr.size, pid, || {
+                    process::exe(pid)
+                });
+        }
         Ok(Handle {
             ino: attr.ino,
             kind: attr.kind,
@@ -300,11 +309,12 @@ impl Drop for Mounted {
 
 /// 마운트한다. `mountpoint`는 드라이브 문자(`E:`)나 아직 없는 폴더 경로.
 /// `players`([`ebms_core::hub::Hub::players`])에 해당하는 프로세스만 받지 않은 플레이 파일을
-/// 읽어 곡 전체를 받을 수 있다. 읽기 응답은 `rt`에서 돈다.
+/// 읽어 곡 전체를 받을 수 있다. 연 파일은 `open_log`에 남긴다. 읽기 응답은 `rt`에서 돈다.
 pub fn spawn_mount(
     fs: Arc<dyn ReadOnlyFs>,
     mountpoint: &Path,
     players: Players,
+    open_log: OpenLog,
     rt: tokio::runtime::Handle,
 ) -> std::io::Result<Mounted> {
     init()?;
@@ -326,6 +336,7 @@ pub fn spawn_mount(
     let context = WinFs {
         fs,
         players,
+        open_log,
         rt,
         security: security_descriptor()?,
         time: filetime_now(),
