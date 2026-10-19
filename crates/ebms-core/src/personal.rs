@@ -12,8 +12,8 @@ use crate::index::Index;
 use crate::paths::Paths;
 use crate::{Error, Result};
 
-/// 개인 채보로 받는 확장자 (소문자). 서버 차트 확장자에 bmson을 더한다.
-pub const PERSONAL_EXTS: &[&str] = &["bms", "bme", "bml", "pms", "bmson"];
+/// 개인 채보로 받는 확장자 (소문자). 서버 차트 확장자와 같다.
+pub const PERSONAL_EXTS: &[&str] = crate::CHART_EXTS;
 /// 채보 하나의 최대 크기. 채보가 아닌 큰 파일을 잘못 고른 경우를 막는다.
 pub const MAX_SIZE: u64 = 16 << 20;
 

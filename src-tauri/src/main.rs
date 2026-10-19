@@ -5,10 +5,12 @@
 //! 켜질 때 서버 공지 중 확인하지 않은 것이 있으면 공지 창을 띄운다([`notices`]).
 //! 이미 떠 있을 때 다시 실행하면 떠 있는 설정 창을 앞으로 가져온다.
 //! 앱 데이터는 실행 파일 옆 `data` 폴더에 둔다([`AppDir::default_root`]).
+//! 설정 창에서 F12를 누르면 숨은 개발자 도구 창이 열린다([`devtools`]).
 //! 로그는 콘솔과 앱 데이터 폴더의 `logs/`에 함께 남긴다([`logging`]).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod devtools;
 mod logging;
 mod mount;
 mod notices;
@@ -112,6 +114,9 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             commands::set_mount_point,
             commands::log_info,
             commands::open_log_dir,
+            devtools::open_devtools,
+            devtools::devtools_opens,
+            devtools::devtools_clear,
             notices::pending_notices,
             notices::ack_notices,
             update::update_info,
@@ -136,8 +141,13 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
         })
         // 설정 창을 닫으면 앱을 끝낸다. 가상 드라이브는 아래 `RunEvent::Exit`에서 내린다.
         .on_window_event(|window, event| {
-            if window.label() == SETTINGS && matches!(event, WindowEvent::Destroyed) {
-                window.app_handle().exit(0);
+            if !matches!(event, WindowEvent::Destroyed) {
+                return;
+            }
+            match window.label() {
+                SETTINGS => window.app_handle().exit(0),
+                devtools::WINDOW => devtools::on_closed(window.app_handle()),
+                _ => {}
             }
         })
         .build(tauri::generate_context!())?;

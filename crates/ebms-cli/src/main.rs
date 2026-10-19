@@ -457,7 +457,13 @@ fn mount(
     #[cfg(target_os = "linux")]
     let session = ebms_vfs_fuse::spawn_mount(drive, mountpoint, hub.players());
     #[cfg(windows)]
-    let session = ebms_vfs_winfsp::spawn_mount(drive, mountpoint, hub.players(), hub.runtime());
+    let session = ebms_vfs_winfsp::spawn_mount(
+        drive,
+        mountpoint,
+        hub.players(),
+        hub.open_log(),
+        hub.runtime(),
+    );
     let _session = session.with_context(|| format!("mount {}", mountpoint.display()))?;
     tracing::info!(mountpoint = %mountpoint.display(), "mounted");
 

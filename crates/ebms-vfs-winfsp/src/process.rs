@@ -54,6 +54,11 @@ impl Caller for ProcessCaller {
     }
 }
 
+/// 프로세스 실행 파일 경로. 개발자 도구의 파일 열기 기록에 쓴다.
+pub(crate) fn exe(pid: u32) -> Option<String> {
+    Process::open(pid)?.exe()
+}
+
 struct Process(HANDLE);
 
 impl Process {
