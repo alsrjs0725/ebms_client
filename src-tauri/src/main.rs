@@ -18,14 +18,11 @@ mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use ebms_core::config::AppDir;
 use ebms_core::hub::Hub;
 use tauri::{AppHandle, Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
-/// 자동 동기화 간격
-const SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const SETTINGS: &str = "settings";
 
 pub struct AppState {
@@ -126,14 +123,10 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
         .setup(move |app| {
             let state = app.state::<AppState>();
             state.mount.start(&state.hub);
+            // 자동 동기화는 켜질 때 한 번만 한다. 동기화 트래픽도 사전 다운로드 한도에서 빠지므로
+            // 실행 중 주기적으로 다시 받지 않는다. 그 뒤로는 "지금 동기화"로만 받는다.
             let hub = hub.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut tick = tokio::time::interval(SYNC_INTERVAL);
-                loop {
-                    tick.tick().await;
-                    hub.sync_all().await;
-                }
-            });
+            tauri::async_runtime::spawn(async move { hub.sync_all().await });
             build_settings(app.handle())?;
             notices::check_on_start(app.handle(), state.hub.clone());
             update::check_on_start(app.handle());
