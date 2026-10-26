@@ -391,6 +391,60 @@ mod tests {
     }
 
     #[test]
+    fn migrate_copies_settings_when_folder_cannot_move() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("old");
+        std::fs::create_dir_all(old.join("servers/a/cache")).unwrap();
+        std::fs::create_dir_all(old.join("servers/b")).unwrap();
+        std::fs::write(old.join("config.toml"), "cache_limit_gb = 3\n").unwrap();
+        std::fs::write(old.join("notices_seen.json"), b"{}").unwrap();
+        std::fs::write(old.join("servers/a/session"), b"key").unwrap();
+        std::fs::write(old.join("servers/a/index.sqlite"), b"x").unwrap();
+        std::fs::write(old.join("servers/a/cache/1.ogg"), b"x").unwrap();
+        std::fs::write(old.join("servers/b/index.sqlite"), b"x").unwrap();
+        // 새 폴더에 이미 다른 파일이 있으면 폴더째 옮기지 못한다(드라이브가 다를 때와 같은 길).
+        let dir = AppDir::new(tmp.path().join("new/data"));
+        std::fs::create_dir_all(dir.root().join("logs")).unwrap();
+        std::fs::write(dir.root().join("logs/app.log"), b"log").unwrap();
+
+        assert!(dir.migrate_from(&old).unwrap());
+        // 설정·공지 기록·세션 파일만 옮기고 인덱스·캐시는 버린다. 예전 폴더는 지운다.
+        assert_eq!(dir.load_config().unwrap().cache_limit_gb, Some(3));
+        assert!(dir.root().join("notices_seen.json").exists());
+        assert_eq!(
+            std::fs::read(dir.root().join("servers/a/session")).unwrap(),
+            b"key"
+        );
+        assert!(!dir.root().join("servers/a/index.sqlite").exists());
+        assert!(!dir.root().join("servers/a/cache").exists());
+        assert!(!dir.root().join("servers/b").exists());
+        assert!(dir.root().join("logs/app.log").exists());
+        assert!(!old.exists());
+    }
+
+    #[test]
+    fn migrate_needs_old_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = tmp.path().join("old");
+        std::fs::create_dir_all(old.join("servers/a")).unwrap();
+        let dir = AppDir::new(tmp.path().join("new"));
+        // 예전 폴더에 설정이 없거나 같은 폴더면 옮기지 않는다.
+        assert!(!dir.migrate_from(&old).unwrap());
+        assert!(old.exists());
+        assert!(!dir.migrate_from(dir.root()).unwrap());
+    }
+
+    #[test]
+    fn broken_config_names_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppDir::new(dir.path());
+        std::fs::write(app.config_path(), "cache_limit_gb = \"many\"\n").unwrap();
+        let err = app.load_config().unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("config.toml"), "{err}");
+    }
+
+    #[test]
     fn insecure_url_is_non_loopback_http() {
         for url in [
             "http://ebms.example.com",

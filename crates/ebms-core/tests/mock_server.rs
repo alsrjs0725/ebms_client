@@ -17,8 +17,9 @@ use ebms_core::api::Api;
 use ebms_core::auth::LoginRequest;
 use ebms_core::config::AppDir;
 use ebms_core::fs::{Caller, Kind, ReadOnlyFs, Trusted};
-use ebms_core::hub::Hub;
+use ebms_core::hub::{Hub, SongHit};
 use ebms_core::manifest::{FileEntry, FileKind, SongManifest};
+use ebms_core::notice::{self, NoticeStore};
 use ebms_core::{Client, Error, Options};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -55,6 +56,10 @@ struct Server {
     corrupt_chart: bool,
     /// `/api/pre/tables` 응답. 없으면 404(난이도표가 없는 이전 서버).
     tables: Option<serde_json::Value>,
+    /// `/api/notices` 응답. 없으면 404(공지 API가 없는 이전 서버).
+    notices: Option<serde_json::Value>,
+    /// 켜 두면 `/api/notices`가 500.
+    notices_fail: bool,
 }
 
 #[derive(Default)]
@@ -74,6 +79,8 @@ struct Counters {
 #[derive(Default)]
 struct Gate {
     hold_pre: AtomicBool,
+    /// 켜 두면 공지 응답을 붙잡는다. 응답이 없는 서버 흉내.
+    hold_notices: AtomicBool,
     release: tokio::sync::Notify,
 }
 
@@ -147,6 +154,19 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             get(|State(s): State<AppState>| async move {
                 let api = s.server().api;
                 axum::Json(json!({"api": api, "server": "test", "auth": ["google", "discord"]}))
+            }),
+        )
+        .route(
+            "/api/notices",
+            get(|State(s): State<AppState>| async move {
+                if s.gate.hold_notices.load(Ordering::SeqCst) {
+                    s.gate.release.notified().await;
+                }
+                let server = s.server();
+                if server.notices_fail {
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                server.notices.clone().map(axum::Json).ok_or(StatusCode::NOT_FOUND)
             }),
         )
         // ---- 로그인 (웹에는 이미 로그인돼 있다고 가정) ----
@@ -1560,4 +1580,197 @@ fn other_players_ignore_qwilight_preview_rule() {
     read_all(&fs, &format!("{SONG}/preview.ogg")).unwrap();
     read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap();
     assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+}
+
+/// 서버 하나를 추가하고 로그인·동기화한 허브.
+fn hub_with_server(
+    rt: &tokio::runtime::Runtime,
+    url: &str,
+    dir: &std::path::Path,
+) -> (Hub, Arc<ebms_core::hub::Server>) {
+    let hub = Hub::open(AppDir::new(dir), false, rt.handle().clone()).unwrap();
+    let server = rt.block_on(async {
+        let s = hub.add(url, Some("S")).await.unwrap();
+        hub.login(&s.entry.id, Duration::from_secs(10), fake_browser)
+            .await
+            .unwrap();
+        s.sync().await.unwrap();
+        s
+    });
+    (hub, server)
+}
+
+#[test]
+fn hub_finds_songs_and_links_personal_charts() {
+    let rt = runtime();
+    let (state, _) = server_state();
+    let url = spawn_server(&rt, state);
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, server) = hub_with_server(&rt, &url, dir.path());
+    // 키체인을 쓰지 않으면 세션키가 파일에 있다고 알린다.
+    assert!(server.session_in_file());
+
+    // 낱말마다 대소문자를 무시하고, 모든 낱말이 들어 있어야 한다.
+    let hit = SongHit {
+        song_id: 1,
+        dir: SONG.into(),
+    };
+    assert_eq!(
+        server.search_songs("title ARTIST").unwrap(),
+        std::slice::from_ref(&hit)
+    );
+    assert_eq!(server.search_songs("00001").unwrap(), [hit]);
+    assert!(server.search_songs("artist nope").unwrap().is_empty());
+    assert!(server.search_songs("   ").unwrap().is_empty());
+
+    let good = dir.path().join("mine.bme");
+    std::fs::write(&good, b"#TITLE mine\n").unwrap();
+    let bad = dir.path().join("notes.txt");
+    std::fs::write(&bad, b"x").unwrap();
+    let drive = hub.drive();
+    let path = format!("S/{SONG}/mine.bme");
+    // 일부가 실패해도 연결된 채보는 가상 드라이브에 바로 보인다.
+    let err = rt
+        .block_on(server.add_personal_charts(1, vec![good.clone(), bad]))
+        .unwrap_err();
+    assert!(err.to_string().contains("not a chart file"), "{err}");
+    assert_eq!(read_all(drive.as_ref(), &path).unwrap(), b"#TITLE mine\n");
+    // 없는 곡에는 연결하지 않는다.
+    assert!(
+        rt.block_on(server.add_personal_charts(99, vec![good.clone()]))
+            .is_err()
+    );
+
+    let linked = server.personal_charts().unwrap();
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0].chart.name, "mine.bme");
+    assert_eq!(linked[0].dir.as_deref(), Some(SONG));
+
+    assert!(
+        rt.block_on(server.remove_personal_chart(1, "mine.bme".into()))
+            .unwrap()
+    );
+    assert!(drive.resolve(&path).is_none());
+    assert!(
+        !rt.block_on(server.remove_personal_chart(1, "mine.bme".into()))
+            .unwrap()
+    );
+    assert!(server.personal_charts().unwrap().is_empty());
+}
+
+#[test]
+fn hub_settings_apply_to_open_servers() {
+    let rt = runtime();
+    let (state, _) = server_state();
+    let url = spawn_server(&rt, state);
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, server) = hub_with_server(&rt, &url, dir.path());
+    assert!(hub.server("nope").is_err());
+
+    // 캐시 한도는 1GB 이상. 바꾸면 설정에 남고 열린 서버의 캐시에도 바로 적용한다.
+    assert!(rt.block_on(hub.set_cache_limit_gb(0)).is_err());
+    rt.block_on(hub.set_cache_limit_gb(2)).unwrap();
+    assert_eq!(server.client.fetcher.cache().limit(), 2 << 30);
+    let config = AppDir::new(dir.path()).load_config().unwrap();
+    assert_eq!(config.cache_limit_gb, Some(2));
+
+    // 사전 다운로드할 난이도표. 중복은 빼고 정렬해 둔다.
+    assert_eq!(server.pre_tables().unwrap(), None);
+    server.set_pre_tables(Some(&[3, 1, 3])).unwrap();
+    assert_eq!(server.pre_tables().unwrap(), Some(vec![1, 3]));
+    server.set_pre_tables(None).unwrap();
+    assert_eq!(server.pre_tables().unwrap(), None);
+}
+
+#[test]
+fn removed_server_refuses_to_sync() {
+    let rt = runtime();
+    let (state, _) = server_state();
+    let url = spawn_server(&rt, state);
+    let dir = tempfile::tempdir().unwrap();
+    let (hub, server) = hub_with_server(&rt, &url, dir.path());
+    let last_sync = hub.app_dir().server_dir(&server.entry).join("last_sync");
+    assert!(last_sync.exists());
+    std::fs::remove_file(&last_sync).unwrap();
+
+    // 목록에서 뺀 서버를 붙잡고 있던 쪽(설정 창 등)이 동기화해도 서버 폴더에 다시 쓰지 않는다.
+    rt.block_on(hub.remove(&server.entry.id, false)).unwrap();
+    let err = rt.block_on(server.sync()).unwrap_err();
+    assert!(err.to_string().contains("was removed"), "{err}");
+    assert!(!last_sync.exists());
+    assert!(server.sync_status().last_error.is_none());
+}
+
+#[test]
+fn hub_rejects_unsupported_or_unreachable_server() {
+    let rt = runtime();
+    let (state, _) = server_state();
+    state.server().api = 99;
+    let url = spawn_server(&rt, state);
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
+    let Err(err) = rt.block_on(hub.add(&url, None)) else {
+        panic!("added a server with unsupported api");
+    };
+    assert!(matches!(err, Error::ApiVersion(99)), "{err:?}");
+
+    // 아무도 듣지 않는 포트
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let Err(err) = rt.block_on(hub.add(&format!("http://127.0.0.1:{port}"), None)) else {
+        panic!("added an unreachable server");
+    };
+    assert!(
+        err.to_string().contains("not a reachable EBMS server"),
+        "{err}"
+    );
+    // 추가하지 못한 서버는 목록·설정에 남지 않는다.
+    assert!(hub.servers().is_empty());
+    assert!(
+        AppDir::new(dir.path())
+            .load_config()
+            .unwrap()
+            .servers
+            .is_empty()
+    );
+}
+
+#[test]
+fn notice_check_reports_unseen_and_unreachable_servers() {
+    let rt = runtime();
+    let states: Vec<AppState> = (0..4).map(|_| server_state().0).collect();
+    states[0].server().notices = Some(json!([
+        {"id": 1, "title": "점검", "body": "본문", "level": "warning", "updated_at": 100}
+    ]));
+    // states[1]은 공지 API가 없는 이전 서버(404): 공지가 없는 것으로 본다.
+    states[2].server().notices_fail = true;
+    states[3].gate.hold_notices.store(true, Ordering::SeqCst);
+    let dir = tempfile::tempdir().unwrap();
+    let app = AppDir::new(dir.path());
+    let hub = Hub::open(app.clone(), false, rt.handle().clone()).unwrap();
+    for (state, name) in states.iter().zip(["A", "Old", "Broken", "Slow"]) {
+        let url = spawn_server(&rt, state.clone());
+        rt.block_on(hub.add(&url, Some(name))).unwrap();
+    }
+    let store = NoticeStore::new(&app);
+    let timeout = Duration::from_millis(500);
+
+    let (found, failed) = rt.block_on(notice::check(&store, hub.servers(), timeout));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].server_name, "A");
+    assert_eq!(found[0].notices[0].title, "점검");
+    assert_eq!(found[0].notices[0].level, "warning");
+    // 오류를 낸 서버와 제때 답하지 않은 서버는 나중에 다시 확인하도록 돌려준다.
+    let failed: Vec<&str> = failed.iter().map(|s| s.entry.name.as_str()).collect();
+    assert_eq!(failed, ["Broken", "Slow"]);
+
+    // 확인한 공지는 다시 띄우지 않는다.
+    store.mark_seen(&found).unwrap();
+    states[2].server().notices_fail = false;
+    states[3].gate.hold_notices.store(false, Ordering::SeqCst);
+    let (found, failed) = rt.block_on(notice::check(&store, hub.servers(), timeout));
+    assert!(found.is_empty(), "{found:?}");
+    assert!(failed.is_empty());
 }

@@ -155,3 +155,37 @@ fn spawn(hub: &Hub, point: &Path) -> std::io::Result<Session> {
 fn spawn(_hub: &Hub, _point: &Path) -> std::io::Result<Session> {
     Err(std::io::Error::other("not supported on this OS"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_point_needs_absolute_path() {
+        assert!(parse_point("ebms").is_err());
+        assert!(parse_point("").is_err());
+        let abs = std::env::temp_dir().join("ebms");
+        let input = format!("  {}  ", abs.display());
+        assert_eq!(parse_point(&input).unwrap(), abs);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn parse_point_accepts_drive_letter_forms() {
+        for input in ["e", "E:", "e:\\", "E:/", " E "] {
+            assert_eq!(
+                parse_point(input).unwrap(),
+                PathBuf::from("E:"),
+                "{input:?}"
+            );
+        }
+        assert!(parse_point("1:").is_err());
+        assert!(parse_point("EE:").is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn parse_point_has_no_drive_letters() {
+        assert!(parse_point("E:").is_err());
+    }
+}

@@ -368,6 +368,117 @@ mod tests {
     }
 
     #[test]
+    fn failed_install_restores_replaced_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("ebms-app.exe"), b"old app").unwrap();
+        // 폴더가 있어야 할 자리에 파일이 있어 두 번째 파일을 놓지 못한다.
+        std::fs::write(dir.join("lib"), b"not a folder").unwrap();
+        let zip = make_zip(&[
+            ("ebms-windows-x64/ebms-app.exe", b"new app"),
+            ("ebms-windows-x64/lib/x.dll", b"new dll"),
+        ]);
+        assert!(install(&zip, dir, "ebms-app.exe").is_err());
+        // 이미 바꾼 파일은 되돌리고 비켜 둔 `*.old`도 남기지 않는다.
+        assert_eq!(std::fs::read(dir.join("ebms-app.exe")).unwrap(), b"old app");
+        assert!(!dir.join("ebms-app.exe.old").exists());
+        assert_eq!(std::fs::read(dir.join("lib")).unwrap(), b"not a folder");
+        assert!(!dir.join(STAGING).exists());
+    }
+
+    #[test]
+    fn install_skips_files_outside_package_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // 지난 업데이트가 남긴 `*.old`가 있어도 다시 비켜 둔다.
+        std::fs::write(dir.join("ebms-app.exe"), b"old app").unwrap();
+        std::fs::write(dir.join("ebms-app.exe.old"), b"older app").unwrap();
+        let zip = make_zip(&[
+            ("stray.txt", b"top level"),
+            ("ebms-windows-x64/ebms-app.exe", b"new app"),
+            ("ebms-windows-x64/res/icon.png", b"icon"),
+        ]);
+        install(&zip, dir, "ebms-app.exe").unwrap();
+        assert!(!dir.join("stray.txt").exists());
+        assert_eq!(std::fs::read(dir.join("ebms-app.exe")).unwrap(), b"new app");
+        assert_eq!(
+            std::fs::read(dir.join("ebms-app.exe.old")).unwrap(),
+            b"old app"
+        );
+        assert_eq!(std::fs::read(dir.join("res/icon.png")).unwrap(), b"icon");
+    }
+
+    #[test]
+    fn cleanup_removes_nested_old_files_and_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::create_dir_all(dir.join("res")).unwrap();
+        std::fs::create_dir_all(dir.join(STAGING).join("res")).unwrap();
+        std::fs::write(dir.join("res/icon.png.old"), b"old").unwrap();
+        std::fs::write(dir.join("res/icon.png"), b"new").unwrap();
+        std::fs::write(dir.join(STAGING).join("res/half.png"), b"x").unwrap();
+        cleanup(dir);
+        assert!(!dir.join("res/icon.png.old").exists());
+        assert!(dir.join("res/icon.png").exists());
+        assert!(!dir.join(STAGING).exists());
+        // 없는 폴더도 그냥 넘어간다.
+        cleanup(&dir.join("missing"));
+    }
+
+    /// `body`를 `/pkg.zip`으로 주는 서버. 다른 주소는 404.
+    async fn serve(body: Vec<u8>) -> String {
+        let app = axum::Router::new().route(
+            "/pkg.zip",
+            axum::routing::get(move || {
+                let body = body.clone();
+                async move { body }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn release(asset_url: String, digest: Option<String>) -> Release {
+        Release {
+            version: "0.2.0".into(),
+            notes: String::new(),
+            page_url: String::new(),
+            asset_url,
+            digest,
+        }
+    }
+
+    #[tokio::test]
+    async fn download_checks_sha256() {
+        let body = b"package bytes".to_vec();
+        let base = serve(body.clone()).await;
+        let url = format!("{base}/pkg.zip");
+        let sha = crate::sha256_hex(&body);
+
+        let ok = download(&release(url.clone(), Some(format!("sha256:{sha}")))).await;
+        assert_eq!(ok.unwrap(), body);
+        let upper = format!("sha256:{}", sha.to_uppercase());
+        assert_eq!(
+            download(&release(url.clone(), Some(upper))).await.unwrap(),
+            body
+        );
+        // GitHub가 해시를 주지 않으면 확인하지 않는다.
+        assert_eq!(download(&release(url.clone(), None)).await.unwrap(), body);
+
+        // 받은 내용이 해시와 다르면 설치하지 않도록 오류
+        let wrong = format!("sha256:{}", "0".repeat(64));
+        let bad = download(&release(url, Some(wrong))).await;
+        assert!(matches!(bad, Err(Error::Integrity(_))), "{bad:?}");
+        let missing = download(&release(format!("{base}/missing"), None)).await;
+        assert!(
+            matches!(missing, Err(Error::Status { status: 404, .. })),
+            "{missing:?}"
+        );
+    }
+
+    #[test]
     fn install_without_required_file_changes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();

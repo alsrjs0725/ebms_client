@@ -161,4 +161,49 @@ mod tests {
         assert_eq!(store.load().unwrap(), None);
         store.clear().unwrap();
     }
+
+    #[test]
+    fn blank_or_padded_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new("http://127.0.0.1:8000", dir.path(), false);
+        let file = session_file(dir.path());
+        // 손으로 고친 파일의 앞뒤 공백·줄바꿈은 무시하고, 비어 있으면 로그인하지 않은 것으로 본다.
+        std::fs::write(&file, "  key\r\n").unwrap();
+        assert_eq!(store.load().unwrap().as_deref(), Some("key"));
+        std::fs::write(&file, "\n").unwrap();
+        assert_eq!(store.load().unwrap(), None);
+    }
+
+    #[test]
+    fn save_replaces_key_and_stale_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(
+            "http://127.0.0.1:8000",
+            &dir.path().join("servers/a"),
+            false,
+        );
+        store.save("first").unwrap();
+        // 지난번에 쓰다 만 임시 파일이 있어도 덮어쓴다.
+        std::fs::write(
+            session_file(&dir.path().join("servers/a")).with_extension("tmp"),
+            b"x",
+        )
+        .unwrap();
+        store.save("second").unwrap();
+        assert_eq!(store.load().unwrap().as_deref(), Some("second"));
+        assert!(
+            !session_file(&dir.path().join("servers/a"))
+                .with_extension("tmp")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn unreadable_session_file_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // 파일 자리에 폴더가 있으면 없는 것으로 넘기지 않고 오류를 낸다.
+        std::fs::create_dir_all(session_file(dir.path())).unwrap();
+        let store = SessionStore::new("http://127.0.0.1:8000", dir.path(), false);
+        assert!(store.load().is_err());
+    }
 }

@@ -55,3 +55,48 @@ fn http_detail(e: &reqwest::Error) -> String {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn http_error_shows_cause() {
+        // 아무도 듣지 않는 포트
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let err: Error = reqwest::get(format!("http://127.0.0.1:{port}/"))
+            .await
+            .unwrap_err()
+            .into();
+        // 겉 메시지("error sending request ...")에 원인(연결 거부)까지 붙인다.
+        let msg = err.to_string();
+        assert!(msg.starts_with("http: "), "{msg}");
+        assert!(msg.contains("os error"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn http_timeout_says_timed_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // 연결은 받고 응답하지 않는다.
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            std::future::pending::<()>().await
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(200))
+            .build()
+            .unwrap();
+        let err: Error = client
+            .get(format!("http://{addr}/"))
+            .send()
+            .await
+            .unwrap_err()
+            .into();
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+}

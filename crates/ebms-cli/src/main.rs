@@ -479,3 +479,28 @@ fn mount(
     });
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_bytes_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(1536), "1.5 KB");
+        assert_eq!(human_bytes(5 << 30), "5.0 GB");
+        // TB보다 큰 단위는 없다.
+        assert_eq!(human_bytes(2048 << 40), "2048.0 TB");
+    }
+
+    #[test]
+    fn login_hint_for_unauthorized() {
+        assert_eq!(
+            login_hint(Error::Unauthorized).to_string(),
+            "login required: ebms login"
+        );
+        assert_eq!(login_hint(Error::Other("boom".into())).to_string(), "boom");
+    }
+}

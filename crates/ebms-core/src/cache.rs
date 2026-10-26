@@ -397,6 +397,11 @@ mod tests {
             }
             Reset(song_dir)
         };
+        // root는 권한과 상관없이 지울 수 있어 지우기 실패를 만들 수 없다.
+        #[cfg(unix)]
+        if std::fs::write(root.join("1/.probe"), b"").is_ok() {
+            return Ok(());
+        }
 
         #[cfg(windows)]
         let _file_lock = {

@@ -177,4 +177,33 @@ mod tests {
         assert!(!store.load().contains_key("a"));
         assert_eq!(store.unseen("a", &[notice(2, 20)]), vec![notice(2, 20)]);
     }
+
+    #[test]
+    fn broken_record_shows_notices_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppDir::new(dir.path());
+        std::fs::write(app.root().join("notices_seen.json"), b"{not json").unwrap();
+        let store = NoticeStore::new(&app);
+        let active = vec![notice(1, 10)];
+        // 기록을 읽지 못하면 확인하지 않은 것으로 보고 다시 띄운다(앱이 멈추지 않게).
+        assert_eq!(store.unseen("a", &active), active);
+        store
+            .mark_seen(&[ServerNotices {
+                server_id: "a".into(),
+                server_name: "A".into(),
+                notices: active.clone(),
+            }])
+            .unwrap();
+        assert!(store.unseen("a", &active).is_empty());
+        // 다시 쓴 기록은 다른 서버 기록을 지우지 않고 쌓인다.
+        store
+            .mark_seen(&[ServerNotices {
+                server_id: "b".into(),
+                server_name: "B".into(),
+                notices: active.clone(),
+            }])
+            .unwrap();
+        assert!(store.unseen("a", &active).is_empty());
+        assert!(store.unseen("b", &active).is_empty());
+    }
 }
