@@ -13,7 +13,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 ebms-core = { path = "../crates/ebms-core" }
-dirs.workspace = true
 futures-util.workspace = true
 open.workspace = true
 serde.workspace = true
@@ -24,9 +23,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-ebms-vfs-fuse = { path = "../crates/ebms-vfs-fuse" }
 
 [target.'cfg(windows)'.dependencies]
 ebms-vfs-winfsp = { path = "../crates/ebms-vfs-winfsp" }

@@ -7,9 +7,7 @@ EBMS 서버의 곡을 가상 드라이브로 보여주고, 구동기(beatoraja, 
 | 크레이트 | 내용 |
 | --- | --- |
 | `ebms-core` | 서버 API, 로그인·세션키, 서버 목록, 동기화(차트·매니페스트·사전 청크), 가상 트리, 요청 시 다운로드, 캐시 |
-| `ebms-vfs-fuse` | Linux FUSE 백엔드 (지원 중단, 개발·테스트용으로만 남김) |
 | `ebms-vfs-winfsp` | Windows WinFsp 백엔드 |
-| `ebms-cli` | 터미널에서 동기화·조회·마운트 (`ebms`) |
 | `src-tauri` (`ebms-app`) | 앱과 설정 창. 화면은 `ui/` (빌드 단계 없는 HTML·JS) |
 
 ## 앱
@@ -32,25 +30,7 @@ cargo run -p ebms-app   # 설정 창을 열고, 창을 닫으면 종료
 
 ## 지원 플랫폼
 
-Windows만 지원합니다. Linux 클라이언트는 지원을 중단했고 릴리스에 포함하지 않습니다. Linux FUSE 백엔드(`ebms-vfs-fuse`)는 코어를 Linux에서 개발·테스트할 수 있게 코드로만 남겨 두었으며(`$XDG_RUNTIME_DIR/ebms`에 마운트, `libwebkit2gtk-4.1-dev`·`fuse3` 필요), 동작을 보장하지 않습니다. macOS는 지원 계획이 없습니다.
-
-## 사용 (개발용 CLI)
-
-```bash
-ebms() { cargo run -q -p ebms-cli -- "$@"; }
-
-ebms server add http://localhost:8000      # 서버 추가 (여러 개 가능)
-ebms login                                 # 브라우저로 로그인, 세션키는 OS 키체인에 저장
-ebms whoami                                # 계정, 남은 티켓, 이번 달 사전 다운로드 사용량
-ebms sync                                  # 차트·매니페스트·사전 청크 동기화 (사전 다운로드)
-ebms tables [--select 1,2 | --all]         # 난이도표 목록과 사전 다운로드 범위(고른 표의 곡만 / 전곡)
-ebms ls                                    # 곡 폴더 목록
-ebms cat "00001 Artist - Title/bgm01.wav" > out.wav
-ebms mount E:                              # 서버별 폴더로 마운트 (Ctrl-C로 해제)
-ebms logout
-```
-
-서버가 여러 개면 `--server <id|이름|주소>`(또는 `EBMS_SERVER`)로 대상을 고릅니다. 앱 데이터 폴더는 실행 파일 옆 `data`이고 `--data`(또는 `EBMS_DATA`)로 바꿀 수 있습니다. 키체인이 없는 환경에서는 세션키를 서버 데이터 폴더의 `session` 파일(권한 600)에 둡니다(`--no-keyring`으로 강제).
+Windows만 지원합니다. 다른 OS에서도 코어 테스트와 앱 빌드는 되지만(Linux는 `libwebkit2gtk-4.1-dev` 필요) 가상 드라이브는 띄우지 않습니다. 키체인이 없는 환경에서는 세션키를 서버 데이터 폴더의 `session` 파일(권한 600)에 둡니다(`EBMS_NO_KEYRING`으로 강제).
 
 Windows 마운트에는 [WinFsp](https://winfsp.dev/rel/) 설치가 필요합니다(없으면 앱은 뜨고 마운트만 실패합니다). Windows에서 빌드하려면 bindgen용 LLVM(`libclang`)이 필요합니다.
 

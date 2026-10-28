@@ -37,7 +37,7 @@ E:\ (또는 ~/ebms 마운트 지점)
 
 ### 비기능
 - 실행 중 메모리 수십 MB 이하, 유휴 시 CPU·네트워크 사용 거의 없음. 설정 창(웹뷰)은 닫으면 해제.
-- Windows 전용. Linux 클라이언트는 지원 중단(배포하지 않음, FUSE 백엔드는 개발용으로만 남김), macOS는 계획 없음 (§5 참고).
+- Windows 전용. Linux·macOS는 지원하지 않는다 (§5 참고).
 - 곡 고르는 화면에서 스크롤만 해도 곡 전체가 받아지는 일이 없어야 함 (§6).
 - 오프라인이면 캐시에 있는 곡은 그대로 플레이 가능, 없는 파일은 읽기 오류.
 - 다운로드 중 앱이 죽어도 캐시가 깨지지 않음 (임시 파일 → 검증 → rename).
@@ -49,7 +49,6 @@ E:\ (또는 ~/ebms 마운트 지점)
 | 용도 | 크레이트/도구 |
 | --- | --- |
 | 가상 FS (Windows) | `winfsp` 0.13 (WinFsp 2.1 바인딩) |
-| 가상 FS (Linux, 개발용·지원 중단) | `fuser` 0.18 |
 | 비동기/HTTP | `tokio`, `reqwest` (stream, Range, rustls) |
 | zip | `zip` |
 | 해시 | `sha2`, `md-5` |
@@ -68,7 +67,7 @@ E:\ (또는 ~/ebms 마운트 지점)
  beatoraja / LR2 ──파일 읽기──▶ 가상 드라이브
                                   │
 ┌─────────────────────────────────▼───────────────┐
-│ vfs       OS 백엔드(WinFsp / FUSE) → 공통 trait  │
+│ vfs       OS 백엔드(WinFsp) → 공통 trait          │
 ├──────────────────────────────────────────────────┤
 │ tree      곡/파일 트리 (index.sqlite에서 메모리로) │
 │ fetcher   요청 합치기, 사전/플레이 다운로드       │
@@ -79,8 +78,7 @@ E:\ (또는 ~/ebms 마운트 지점)
 │ bms       차트 파서·해시                          │
 └──────────────────────────────────────────────────┘
         ▲ 상태/이벤트
- src-tauri (상주 프로세스 + 설정 창) ── ui (TS)
- ebms-cli  (마운트·동기화를 터미널에서, 테스트용)
+ src-tauri (상주 프로세스 + 설정 창) ── ui (HTML·JS)
 ```
 
 원칙
@@ -92,7 +90,7 @@ E:\ (또는 ~/ebms 마운트 지점)
 | OS | 선택 | 이유 / 대안 |
 | --- | --- | --- |
 | Windows | **WinFsp** | 진짜 가상 드라이브, 읽기 대기 시간 제한 없음, rclone·sshfs-win이 쓰는 검증된 드라이버. 설치기에 WinFsp 포함 필요. 대안 Cloud Files API(`cloud-filter`, OneDrive 방식)는 드라이버 설치가 없지만 10만 개 이상 placeholder를 실제 NTFS에 만들어야 하고 콜백 60초 제한이 있어 2순위 |
-| Linux | **지원 중단** | FUSE(`fuser`) 백엔드는 코어 개발·테스트용으로만 남기고 배포하지 않음 |
+| Linux | **지원 안 함** | FUSE 백엔드는 지원을 중단하고 삭제함. 코어 테스트는 OS와 무관하게 돈다 |
 | macOS | **계획 없음** | Windows 전용으로 결정 |
 
 ## 6. 다운로드 전략 (핵심)
@@ -123,7 +121,6 @@ beatoraja가 파일을 읽는 시점은 두 가지다.
 - 로그인: `127.0.0.1` 빈 포트에서 수신을 열고 브라우저로 `/auth/client/authorize`를 연다(PKCE `S256`). 서버가 1회용 `code`를 붙여 루프백으로 돌려보내면 `state`를 확인하고 `code` + `code_verifier`를 `/api/auth/client/token`에 보내 세션키를 받는다.
 - 세션키는 OS 키체인(`keyring`)에 서버 주소별로 저장한다. 키체인을 못 쓰면 서버 데이터 폴더의 `session` 파일(권한 600).
 - 모든 API 요청에 `Authorization: Bearer <세션키>`. `401`을 받으면 조용히 로그아웃 상태로 바꾸고(`Api::needs_login`) 설정 창에만 "다시 로그인 필요"를 보여준다.
-- CLI: `ebms server add|list|remove`, `ebms login|logout|whoami`, 나머지 명령은 `--server`로 대상을 고른다(서버가 하나면 생략). `mount`는 `--server`가 없으면 모든 서버를 마운트한다.
 - 가상 드라이브는 서버별 최상위 폴더로 합친다(`drive::Drive`): `E:\<서버 이름>\00123 Artist - Title\`. 같은 곡이 여러 서버에 있어도 합치지 않는다. 한 서버의 세션이 만료되거나 서버가 꺼져도 다른 서버는 그대로이고, 받아 둔 파일은 계속 읽힌다.
 - 상주 앱은 `hub::Hub`로 서버 전체를 관리한다(추가·삭제, 로그인, 서버별 동기화와 상태).
 
@@ -168,9 +165,7 @@ ebms_client/
 ├─ Cargo.toml                 # workspace
 ├─ crates/
 │  ├─ ebms-core/src/{api,sync,bms,tree,fetcher,cache,vfs}/
-│  ├─ ebms-vfs-winfsp/        # Windows 백엔드
-│  ├─ ebms-vfs-fuse/          # Linux 백엔드 (지원 중단, 개발용)
-│  └─ ebms-cli/
+│  └─ ebms-vfs-winfsp/        # Windows 백엔드
 ├─ src-tauri/                 # 상주 프로세스 + 설정 창 (ebms-app)
 ├─ ui/                        # 설정 창 (HTML·JS, 빌드 단계 없음)
 ├─ docs/
@@ -214,8 +209,6 @@ ebms_client/
 
 ## 12. 구현 순서
 
-1. core: api + sync + index + tree + fetcher + cache, CLI로 검증 (서버 반영 완료로 바로 시작)
-2. Linux FUSE 백엔드: 같은 코어를 실제 마운트로 검증
-3. **Windows WinFsp 백엔드 + beatoraja 확인** (백엔드 완료: `ebms-vfs-winfsp`. 남음: Windows 실기에서 beatoraja 확인)
-4. 앱 프로세스, 설정 창 (완료: Linux 마운트, 서버·로그인 관리) / 남음: 설치기(WinFsp 포함)
-5. ~~macOS 검토~~ (Windows 전용으로 결정, Linux 지원 중단)
+1. core: api + sync + index + tree + fetcher + cache (완료)
+2. **Windows WinFsp 백엔드 + beatoraja 확인** (백엔드 완료: `ebms-vfs-winfsp`. 남음: Windows 실기에서 beatoraja 확인)
+3. 앱 프로세스, 설정 창 (완료) / 남음: 설치기(WinFsp 포함)

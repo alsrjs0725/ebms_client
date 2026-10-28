@@ -252,7 +252,7 @@ fn swap(staging: &Path, dir: &Path, files: &[PathBuf]) -> Result<()> {
 }
 
 /// 지난 업데이트가 남긴 `*.old` 파일과 풀다 만 폴더를 지운다. `data` 폴더는 보지 않는다.
-/// 지우지 못한 파일(아직 실행 중인 CLI 등)은 다음에 다시 지운다.
+/// 지우지 못한 파일(아직 실행 중인 이전 프로세스가 쥔 파일 등)은 다음에 다시 지운다.
 pub fn cleanup(dir: &Path) {
     let _ = std::fs::remove_dir_all(dir.join(STAGING));
     fn walk(dir: &Path, top: bool) {
