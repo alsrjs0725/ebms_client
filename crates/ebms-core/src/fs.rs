@@ -1,8 +1,8 @@
-//! OS 가상 FS 백엔드(WinFsp, FUSE)가 호출하는 읽기 전용 파일시스템.
+//! OS 가상 FS 백엔드(WinFsp)가 호출하는 읽기 전용 파일시스템.
 //!
 //! 백엔드 스레드에서 호출한다. 다운로드가 필요한 읽기는 [`ReadOnlyFs::read_async`]로 tokio 런타임에
 //! 맡기고 백엔드 스레드는 바로 돌아간다. 다운로드가 끝나면 런타임 쪽에서 완료 콜백을 부른다.
-//! 동기 [`ReadOnlyFs::read`]는 CLI·테스트용이며, 호출 스레드가 tokio 런타임 스레드여서는 안 된다.
+//! 동기 [`ReadOnlyFs::read`]는 테스트용이며, 호출 스레드가 tokio 런타임 스레드여서는 안 된다.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Arc, RwLock};
@@ -51,7 +51,7 @@ pub trait Caller: Send + Sync {
     }
 }
 
-/// CLI `cat`처럼 사용자가 직접 요청한 읽기. 구동기로 취급한다.
+/// 테스트처럼 직접 요청한 읽기. 구동기로 취급한다.
 pub struct Trusted(pub &'static str);
 
 impl Caller for Trusted {
@@ -67,8 +67,8 @@ impl Caller for Trusted {
 /// [`ReadOnlyFs::read_async`]의 완료 콜백. 정확히 한 번 불린다.
 pub type ReadDone = Box<dyn FnOnce(Result<Vec<u8>>) + Send>;
 
-/// OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템. 서버 하나([`EbmsFs`])와
-/// 여러 서버를 합친 드라이브([`crate::drive::Drive`])가 구현한다.
+/// OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템. 서버의 곡 트리([`EbmsFs`])와
+/// 그것을 서버 이름 폴더 아래에 둔 드라이브([`crate::drive::Drive`])가 구현한다.
 pub trait ReadOnlyFs: Send + Sync {
     fn getattr(&self, ino: Ino) -> Option<Attr>;
     fn lookup(&self, parent: Ino, name: &str) -> Option<Attr>;

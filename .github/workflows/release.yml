@@ -19,7 +19,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Windows 전용. Linux 빌드는 배포하지 않는다 (FUSE 백엔드는 개발용으로만 남김)
+          # Windows 전용
           - os: windows-latest
             platform: windows-x64
             exe: ".exe"
@@ -35,7 +35,7 @@ jobs:
         run: |
           name="ebms-${{ matrix.platform }}"
           mkdir -p "dist/$name"
-          # 실행에 필요한 앱만 담는다 (CLI는 개발용이라 배포하지 않음)
+          # 실행에 필요한 앱만 담는다
           cp "target/release/ebms-app${{ matrix.exe }}" LICENSE "dist/$name/"
           cd dist
           7z a "$name.zip" "$name" >/dev/null

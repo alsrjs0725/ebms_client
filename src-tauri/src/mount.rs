@@ -1,4 +1,4 @@
-//! 가상 드라이브 마운트. Windows는 WinFsp. Linux FUSE는 지원 중단(개발용으로만 남김), macOS는 없음.
+//! 가상 드라이브 마운트(Windows WinFsp). 다른 OS에서는 앱은 뜨지만 마운트하지 않는다(개발·테스트용).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -6,15 +6,13 @@ use std::sync::Mutex;
 use ebms_core::hub::Hub;
 use serde::Serialize;
 
-#[cfg(target_os = "linux")]
-type Session = ebms_vfs_fuse::BackgroundSession;
 #[cfg(windows)]
 type Session = ebms_vfs_winfsp::Mounted;
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(windows))]
 type Session = ();
 
 /// 이 OS에서 가상 드라이브를 띄울 수 있는지
-const SUPPORTED: bool = cfg!(any(target_os = "linux", windows));
+const SUPPORTED: bool = cfg!(windows);
 
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct DriveInfo {
@@ -36,13 +34,9 @@ struct Inner {
     error: Option<String>,
 }
 
-/// 설정에 없으면 `$XDG_RUNTIME_DIR/ebms` (보통 `/run/user/<uid>/ebms`), 없으면 `~/ebms`.
-/// 홈 안에 두면 백업·인덱서처럼 홈 전체를 훑는 프로그램이 플레이 파일을 읽게 된다.
 #[cfg(not(windows))]
 fn default_point() -> Option<PathBuf> {
-    dirs::runtime_dir()
-        .or_else(dirs::home_dir)
-        .map(|d| d.join("ebms"))
+    None
 }
 
 /// 설정에 없으면 비어 있는 드라이브 문자 중 가장 뒤의 것.
@@ -135,11 +129,6 @@ impl Mount {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn spawn(hub: &Hub, point: &Path) -> std::io::Result<Session> {
-    ebms_vfs_fuse::spawn_mount(hub.drive(), point, hub.players())
-}
-
 #[cfg(windows)]
 fn spawn(hub: &Hub, point: &Path) -> std::io::Result<Session> {
     ebms_vfs_winfsp::spawn_mount(
@@ -151,7 +140,7 @@ fn spawn(hub: &Hub, point: &Path) -> std::io::Result<Session> {
     )
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(not(windows))]
 fn spawn(_hub: &Hub, _point: &Path) -> std::io::Result<Session> {
     Err(std::io::Error::other("not supported on this OS"))
 }

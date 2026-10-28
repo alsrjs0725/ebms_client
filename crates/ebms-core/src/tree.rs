@@ -472,7 +472,8 @@ impl SongTree {
             full: false,
         };
 
-        // 이 곡의 로컬 차트를 (size, crc32)로 찾는다. 서버 #10 반영 전 임시 매핑.
+        // 곡 zip의 차트 파일을 내용(size, crc32)이 같은 로컬 차트와 잇는다. 경로가 아니라 내용으로 맞추므로
+        // 같은 경로에 다른 판의 차트가 있어도 섞이지 않는다.
         let mut unmatched = charts;
         let pre: HashMap<String, PreRow> = pre.into_iter().map(|p| (p.path.clone(), p)).collect();
         // 곡 zip의 차트가 든 폴더. 개인 채보를 여기에 둬야 키음·BGA 상대 경로가 맞는다.

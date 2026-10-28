@@ -32,7 +32,7 @@ fn sha(data: &[u8]) -> String {
 
 #[derive(Default)]
 struct Server {
-    /// `/api/version`의 api. 3부터 사전 청크가 있다.
+    /// `/api/version`의 api
     api: u32,
     chart_chunks: HashMap<u32, Vec<u8>>,
     pre_chunks: HashMap<u32, Vec<u8>>,
@@ -53,8 +53,8 @@ struct Server {
     play_cuts: usize,
     /// 켜 두면 청크 본문을 해시 목록과 다르게 망가뜨려 보낸다.
     corrupt_chart: bool,
-    /// `/api/pre/tables` 응답. 없으면 404(난이도표가 없는 이전 서버).
-    tables: Option<serde_json::Value>,
+    /// `/api/pre/tables` 응답
+    tables: serde_json::Value,
 }
 
 #[derive(Default)]
@@ -222,15 +222,12 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             get(|State(s): State<AppState>, headers: HeaderMap| async move {
                 s.authorized(&headers)?;
                 let server = s.server();
-                if server.api < 3 {
-                    return Err(StatusCode::NOT_FOUND);
-                }
                 let sizes = |map: &HashMap<u32, Vec<u8>>| -> HashMap<String, serde_json::Value> {
                     map.iter()
                         .map(|(k, v)| (k.to_string(), json!({"sha256": sha(v), "size": v.len()})))
                         .collect()
                 };
-                Ok(axum::Json(json!({
+                Ok::<_, StatusCode>(axum::Json(json!({
                     "chart": sizes(&server.chart_chunks),
                     "asset": sizes(&server.pre_chunks),
                 })))
@@ -240,7 +237,7 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             "/api/pre/tables",
             get(|State(s): State<AppState>, headers: HeaderMap| async move {
                 s.authorized(&headers)?;
-                s.server().tables.clone().map(axum::Json).ok_or(StatusCode::NOT_FOUND)
+                Ok::<_, StatusCode>(axum::Json(s.server().tables.clone()))
             }),
         )
         .route(
@@ -488,8 +485,9 @@ fn server_state() -> (AppState, Fixture) {
     }];
 
     let mut server = Server {
-        api: 1,
+        api: ebms_core::API_VERSION,
         tickets: 5,
+        tables: json!({"tables": [], "chunks": {}}),
         pre_paths: PRE_FILES.iter().map(|s| s.to_string()).collect(),
         ..Default::default()
     };
@@ -744,30 +742,6 @@ fn replaced_chart_chunk_never_serves_shifted_bytes() {
     env.rt.block_on(env.client.sync()).unwrap();
     assert_eq!(dir_files(&charts).len(), 1);
     assert_eq!(read_all(&fresh, &chart).unwrap(), env.fixture.chart_a);
-}
-
-#[test]
-fn legacy_chunk_names_are_migrated_on_open() {
-    let env = setup(true);
-    env.rt.block_on(env.client.sync()).unwrap();
-    let charts = env._dir.path().join("charts");
-    let [name] = &dir_files(&charts)[..] else {
-        panic!("one chart chunk expected");
-    };
-    std::fs::rename(charts.join(name), charts.join("chart_chunk_00000.zip")).unwrap();
-
-    let mut opts = Options::new(&env.url, env._dir.path());
-    opts.session = Some(KEY.to_string());
-    let client = Client::open(&opts).unwrap();
-    assert_eq!(dir_files(&charts), vec![name.clone()]);
-    let fs = client.fs(env.rt.handle().clone()).unwrap();
-    assert_eq!(
-        read_all(&fs, &format!("{SONG}/_7a.bme")).unwrap(),
-        env.fixture.chart_a
-    );
-    // 다시 받지 않는다.
-    assert!(!env.rt.block_on(client.sync()).unwrap().changed());
-    assert_eq!(env.state.counters.chart_chunk.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -1191,7 +1165,7 @@ fn fake_browser(url: &str) {
 }
 
 #[test]
-fn several_servers_show_as_top_level_folders() {
+fn hub_serves_one_server_under_its_folder() {
     let rt = runtime();
     let (state_a, fixture) = server_state();
     let (state_b, _) = server_state();
@@ -1201,29 +1175,28 @@ fn several_servers_show_as_top_level_folders() {
     let url_b = spawn_server(&rt, state_b.clone());
     let dir = tempfile::tempdir().unwrap();
     let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
+    assert!(hub.server().is_none());
     let banner = fixture
         .files
         .iter()
         .find(|(n, _)| *n == "banner.png")
         .unwrap();
 
-    let (a, b) = rt.block_on(async {
+    let a = rt.block_on(async {
         let a = hub.add(&url_a, Some("Server A")).await.unwrap();
-        let b = hub.add(&url_b, Some("Server B")).await.unwrap();
-        assert!(hub.add(&url_a, None).await.is_err(), "same url twice");
-        assert!(hub.me(&a.entry.id).await.unwrap().is_none());
-        for s in [&a, &b] {
-            let user = hub
-                .login(&s.entry.id, Duration::from_secs(10), fake_browser)
-                .await
-                .unwrap();
-            assert_eq!(user.display_name, "Tester");
-        }
-        hub.sync_all().await;
-        (a, b)
+        // 서버는 하나만 둔다.
+        assert!(hub.add(&url_b, None).await.is_err(), "second server");
+        assert!(hub.me().await.unwrap().is_none());
+        let user = hub
+            .login(Duration::from_secs(10), fake_browser)
+            .await
+            .unwrap();
+        assert_eq!(user.display_name, "Tester");
+        hub.sync().await;
+        a
     });
     assert!(a.sync_status().last_ok_at.is_some());
-    // 키체인 대신 서버별 폴더의 session 파일에 저장됨
+    // 키체인 대신 서버 폴더의 session 파일에 저장됨
     assert!(hub.app_dir().server_dir(&a.entry).join("session").exists());
 
     let drive = hub.drive();
@@ -1233,23 +1206,19 @@ fn several_servers_show_as_top_level_folders() {
         .into_iter()
         .map(|e| e.name)
         .collect();
-    assert_eq!(names, ["Server A", "Server B"]);
-    for server in ["Server A", "Server B"] {
-        let path = format!("{server}/{SONG}/banner.png");
-        assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
-    }
-
-    // 서버 A의 세션이 만료돼도 B는 그대로 동작한다.
-    state_a.server().sessions.clear();
-    rt.block_on(hub.sync_all());
-    assert!(a.sync_status().last_error.is_some());
-    assert!(a.api().needs_login());
-    assert!(b.sync_status().last_error.is_none());
-    let path = format!("Server B/{SONG}/bgm01.wav");
-    assert_eq!(read_all(drive.as_ref(), &path).unwrap(), fixture.files[1].1);
-    // 받아 둔 파일은 로그인 없이도 읽힌다.
+    assert_eq!(names, ["Server A"]);
     let path = format!("Server A/{SONG}/banner.png");
     assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
+
+    let bgm = format!("Server A/{SONG}/bgm01.wav");
+    assert_eq!(read_all(drive.as_ref(), &bgm).unwrap(), fixture.files[1].1);
+
+    // 세션이 만료돼도 받아 둔 파일은 읽힌다.
+    state_a.server().sessions.clear();
+    rt.block_on(a.sync()).unwrap_err();
+    assert!(a.api().needs_login());
+    assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
+    assert_eq!(read_all(drive.as_ref(), &bgm).unwrap(), fixture.files[1].1);
 
     // 캐시 사용량을 보여주고 비울 수 있다.
     let usage = a.usage().unwrap();
@@ -1265,32 +1234,37 @@ fn several_servers_show_as_top_level_folders() {
     let cache_dir = hub.app_dir().server_dir(&a.entry).join("cache");
     assert_eq!(std::fs::read_dir(&cache_dir).unwrap().count(), 0);
 
-    // 삭제하면 로그아웃하고 드라이브에서 빠진다. 설정 파일에도 남지 않는다.
-    // 로컬 데이터도 지우기를 고르면 서버 폴더가 사라진다.
-    // (Windows는 열린 파일을 못 지우므로 서버 B를 놓아 준다.)
-    let b_entry = b.entry.clone();
+    // 빼면 드라이브와 설정에서 사라지고, 로컬 데이터는 남는다.
+    let a_entry = a.entry.clone();
+    drop(a);
+    let a_dir = hub.app_dir().server_dir(&a_entry);
+    rt.block_on(hub.remove(false)).unwrap();
+    assert!(a_dir.join("index.sqlite").exists());
+    assert!(hub.server().is_none());
+    assert!(drive.resolve("Server A").is_none());
+    assert!(
+        AppDir::new(dir.path())
+            .load_config()
+            .unwrap()
+            .server
+            .is_none()
+    );
+
+    // 다른 서버로 바꾼다. 로컬 데이터 지우기를 고르면 서버 폴더가 사라진다.
+    // (Windows는 열린 파일을 못 지우므로 서버를 놓아 준다.)
+    let b = rt.block_on(hub.add(&url_b, Some("Server B"))).unwrap();
+    assert!(drive.resolve("Server B").is_some());
+    let b_dir = hub.app_dir().server_dir(&b.entry);
     drop(b);
-    let b_dir = hub.app_dir().server_dir(&b_entry);
-    assert!(b_dir.join("index.sqlite").exists());
-    rt.block_on(hub.remove(&b_entry.id, true)).unwrap();
+    rt.block_on(hub.remove(true)).unwrap();
     assert!(!b_dir.exists());
     assert!(state_b.server().sessions.is_empty());
-    assert!(drive.resolve("Server B").is_none());
-    assert!(drive.resolve("Server A").is_some());
-    let config = AppDir::new(dir.path()).load_config().unwrap();
-    assert_eq!(config.servers.len(), 1);
-    assert_eq!(config.servers[0].name, "Server A");
 
-    // 지우지 않으면 로컬 데이터는 남는다.
-    let a_dir = hub.app_dir().server_dir(&a.entry);
-    rt.block_on(hub.remove(&a.entry.id, false)).unwrap();
-    assert!(a_dir.join("index.sqlite").exists());
+    // 다시 넣고 열면 그 서버가 남은 로컬 데이터와 함께 열린다.
     rt.block_on(hub.add(&url_a, Some("Server A"))).unwrap();
-
-    // 다시 열면 남은 서버만
     drop(hub);
     let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
-    assert_eq!(hub.servers().len(), 1);
+    assert_eq!(hub.server().unwrap().entry.name, "Server A");
     assert!(hub.drive().resolve(&format!("Server A/{SONG}")).is_some());
 }
 
@@ -1304,7 +1278,7 @@ fn pre_chunk(song_id: u32, files: &[(&str, &[u8])]) -> Vec<u8> {
     make_zip(&refs, zip::CompressionMethod::Stored)
 }
 
-/// 사전 청크가 있는 서버(API 3).
+/// 사전 청크가 있는 서버.
 fn setup_with_pre_chunk() -> Env {
     let env = setup(true);
     let chunk = pre_chunk(
@@ -1315,7 +1289,6 @@ fn setup_with_pre_chunk() -> Env {
         ],
     );
     let mut server = env.state.server();
-    server.api = 3;
     server.pre_chunks.insert(0, chunk);
     drop(server);
     env
@@ -1378,10 +1351,13 @@ fn pre_file_missing_from_chunk_falls_back_to_pre_api() {
 }
 
 #[test]
-fn old_server_has_no_pre_chunks() {
+fn unsupported_api_version_is_rejected() {
     let env = setup(true);
-    let report = env.rt.block_on(env.client.sync()).unwrap();
-    assert!(report.pre_chunks_updated.is_empty());
+    env.state.server().api = ebms_core::API_VERSION - 1;
+    assert!(matches!(
+        env.rt.block_on(env.client.sync()),
+        Err(Error::ApiVersion(v)) if v == ebms_core::API_VERSION - 1
+    ));
     assert_eq!(env.state.counters.pre_hash.load(Ordering::SeqCst), 0);
 }
 
@@ -1393,7 +1369,7 @@ fn selected_difficulty_tables_sync_only_tagged_pre_chunks() {
         server
             .pre_chunks
             .insert(1, pre_chunk(40, &[("banner.png", b"other")]));
-        server.tables = Some(json!({
+        server.tables = json!({
             "tables": [
                 {"id": 1, "name": "Insane", "symbol": "★", "url": "https://t.example/", "charts": 10,
                  "matched_charts": 1, "songs": 1, "fetched_at": 1},
@@ -1401,13 +1377,9 @@ fn selected_difficulty_tables_sync_only_tagged_pre_chunks() {
                  "matched_charts": 1, "songs": 1, "fetched_at": 1},
             ],
             "chunks": {"0": [1], "1": [2]},
-        }));
+        });
     }
-    let tables = env
-        .rt
-        .block_on(env.client.api.pre_tables())
-        .unwrap()
-        .unwrap();
+    let tables = env.rt.block_on(env.client.api.pre_tables()).unwrap();
     assert_eq!(tables.tables.len(), 2);
     assert_eq!(
         tables.chunks_for(&[1, 2]).into_iter().collect::<Vec<_>>(),
@@ -1448,32 +1420,16 @@ fn selected_difficulty_tables_sync_only_tagged_pre_chunks() {
 }
 
 #[test]
-fn server_without_difficulty_tables_syncs_every_pre_chunk() {
-    let env = setup_with_pre_chunk();
-    assert_eq!(env.rt.block_on(env.client.api.pre_tables()).unwrap(), None);
-    env.client.index.set_pre_tables(Some(&[1])).unwrap();
-    let report = env.rt.block_on(env.client.sync()).unwrap();
-    assert_eq!(report.pre_chunks_updated, vec![0]);
-}
-
-#[test]
 fn pending_download_counts_only_missing_chunks_for_selected_tables() {
-    let env = setup(true);
-    // 이전 서버는 크기를 모른다.
-    assert_eq!(
-        env.rt.block_on(env.client.pending_download()).unwrap(),
-        None
-    );
-
     let env = setup_with_pre_chunk();
     let other = pre_chunk(40, &[("banner.png", b"other")]);
     let (chart, pre0, pre1) = {
         let mut server = env.state.server();
         server.pre_chunks.insert(1, other);
-        server.tables = Some(json!({
+        server.tables = json!({
             "tables": [{"id": 1, "name": "Insane", "symbol": "★"}, {"id": 2, "name": "Normal", "symbol": "☆"}],
             "chunks": {"0": [1], "1": [2]},
-        }));
+        });
         let chart: usize = server.chart_chunks.values().map(Vec::len).sum();
         (
             chart as u64,
@@ -1481,12 +1437,7 @@ fn pending_download_counts_only_missing_chunks_for_selected_tables() {
             server.pre_chunks[&1].len() as u64,
         )
     };
-    let p = env
-        .rt
-        .block_on(env.client.pending_download())
-        .unwrap()
-        .unwrap();
-    assert!(p.tables_known);
+    let p = env.rt.block_on(env.client.pending_download()).unwrap();
     assert_eq!(p.chart_bytes, chart);
     assert_eq!(p.pre_for(None), (pre0 + pre1, 2));
     assert_eq!(p.pre_for(Some(&[2])), (pre1, 1));
@@ -1495,11 +1446,7 @@ fn pending_download_counts_only_missing_chunks_for_selected_tables() {
     // 받은 청크는 빼고 센다.
     env.client.index.set_pre_tables(Some(&[1])).unwrap();
     env.rt.block_on(env.client.sync()).unwrap();
-    let p = env
-        .rt
-        .block_on(env.client.pending_download())
-        .unwrap()
-        .unwrap();
+    let p = env.rt.block_on(env.client.pending_download()).unwrap();
     assert_eq!((p.chart_bytes, p.chart_chunks), (0, 0));
     assert_eq!(p.pre_for(Some(&[1])), (0, 0));
     assert_eq!(p.pre_for(None), (pre1, 1));

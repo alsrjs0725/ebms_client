@@ -32,7 +32,7 @@ fn appender(dir: &Path) -> Result<RollingFileAppender, tracing_appender::rolling
 /// 로그를 켠다. 파일 로그를 열지 못하면 콘솔에만 쓰고 이유를 로그에 남긴다.
 /// 파일 로그를 쓰면 그 폴더를 돌려준다.
 pub fn init(root: Option<&Path>) -> Option<PathBuf> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,fuser=error".into());
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
     let file = root.map(|root| {
         let dir = log_dir(root);
         appender(&dir).map(|a| (dir, a))

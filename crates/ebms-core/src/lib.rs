@@ -2,7 +2,7 @@
 //!
 //! - [`api`]: 서버 HTTP API (세션키는 `Authorization: Bearer`)
 //! - [`auth`]: 브라우저 로그인 (루프백 리다이렉트 + PKCE)
-//! - [`config`]: 서버 목록과 앱 데이터 폴더. 한 사용자가 여러 서버에 로그인한다
+//! - [`config`]: 연결한 서버(하나)와 앱 데이터 폴더
 //! - [`session`]: 서버별 세션키 저장 (OS 키체인, 안 되면 파일)
 //! - [`sync`]: 차트 청크·매니페스트 동기화
 //! - [`index`]: 로컬 SQLite 인덱스
@@ -11,11 +11,11 @@
 //! - [`cache`]: 받은 에셋 캐시
 //! - [`personal`]: 사용자가 곡에 연결한 개인 채보 (서버에 올리지 않음)
 //! - [`fs`]: OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템
-//! - [`drive`]: 여러 서버를 서버별 최상위 폴더로 합친 가상 드라이브
+//! - [`drive`]: 서버 이름 폴더 아래에 곡을 둔 가상 드라이브
 //! - [`players`]: BMS 구동기 판별. 곡 전체 다운로드는 구동기만 일으킨다
 //! - [`preview`]: Qwilight 미리듣기 동안 플레이 파일을 받지 않기
 //! - [`openlog`]: 개발자 도구에 보여줄 파일 열기 기록 (메모리에만)
-//! - [`hub`]: 등록된 서버 전체 (추가·삭제, 로그인, 동기화). 상주 앱이 쓴다
+//! - [`hub`]: 연결한 서버 (추가·삭제, 로그인, 동기화). 상주 앱이 쓴다
 //! - [`notice`]: 서버 공지. 상주 앱이 켜질 때 아직 확인하지 않은 공지를 띄운다
 //! - [`update`]: 클라이언트 자동 업데이트 (GitHub Releases)
 
@@ -48,10 +48,8 @@ pub use error::{Error, Result};
 /// 서버가 차트로 취급하는 확장자 (소문자).
 pub const CHART_EXTS: &[&str] = &["bms", "bme", "bml", "pms", "bmson"];
 
-/// 지원하는 서버 API 버전. 1은 로그인이 들어가고 기존 다운로드 API가 아직 남아 있는 서버.
-pub const API_VERSIONS: std::ops::RangeInclusive<u32> = 1..=3;
-/// 사전 청크(`/api/pre/asset*`)가 생긴 API 버전. 이전 서버는 사전 파일을 요청 시 하나씩 받는다.
-pub const PRE_CHUNK_API: u32 = 3;
+/// 지원하는 서버 API 버전(`/api/version`의 `api`).
+pub const API_VERSION: u32 = 3;
 
 pub(crate) fn is_chart_path(path: &str) -> bool {
     extension(path).is_some_and(|e| CHART_EXTS.contains(&e.as_str()))

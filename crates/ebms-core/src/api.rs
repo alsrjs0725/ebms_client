@@ -109,8 +109,7 @@ pub struct Tickets {
     pub refill_seconds: u64,
     /// 다음 티켓이 차는 시각(unix 초, 이 PC 시계 기준). 가득 찼으면 None.
     pub next_refill_at: Option<i64>,
-    /// 다음 티켓이 찰 때까지 남은 초(서버가 계산). 이전 서버는 보내지 않는다.
-    #[serde(default)]
+    /// 다음 티켓이 찰 때까지 남은 초(서버가 계산). 가득 찼으면 None.
     pub next_refill_in: Option<i64>,
 }
 
@@ -291,13 +290,9 @@ impl Api {
         Ok(self.get("/api/version").await?.json().await?)
     }
 
-    /// 지금 게시 중인 공지. 공지 API가 없는 이전 서버면 빈 목록.
+    /// 지금 게시 중인 공지.
     pub async fn notices(&self) -> Result<Vec<Notice>> {
-        match self.get("/api/notices").await {
-            Ok(resp) => Ok(resp.json().await?),
-            Err(Error::Status { status: 404, .. }) => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
+        Ok(self.get("/api/notices").await?.json().await?)
     }
 
     // ---- 로그인 ----
@@ -375,18 +370,14 @@ impl Api {
         self.hash_map("/api/pre/assethash").await
     }
 
-    /// 난이도표와 사전 청크별 태그. 난이도표 API가 없는 이전 서버면 None.
-    pub async fn pre_tables(&self) -> Result<Option<PreTables>> {
+    /// 난이도표와 사전 청크별 태그.
+    pub async fn pre_tables(&self) -> Result<PreTables> {
         #[derive(Deserialize)]
         struct Raw {
             tables: Vec<DifficultyTable>,
             chunks: BTreeMap<String, Vec<u32>>,
         }
-        let raw: Raw = match self.get("/api/pre/tables").await {
-            Ok(resp) => resp.json().await?,
-            Err(Error::Status { status: 404, .. }) => return Ok(None),
-            Err(e) => return Err(e),
-        };
+        let raw: Raw = self.get("/api/pre/tables").await?.json().await?;
         let chunks = raw
             .chunks
             .into_iter()
@@ -396,24 +387,20 @@ impl Api {
                     .map_err(|_| Error::Other(format!("bad chunk id {k:?} from /api/pre/tables")))
             })
             .collect::<Result<_>>()?;
-        Ok(Some(PreTables {
+        Ok(PreTables {
             tables: raw.tables,
             chunks,
-        }))
+        })
     }
 
-    /// 차트·사전 청크의 크기. 크기 API가 없는 이전 서버면 None.
-    pub async fn chunk_sizes(&self) -> Result<Option<ChunkSizes>> {
+    /// 차트·사전 청크의 크기.
+    pub async fn chunk_sizes(&self) -> Result<ChunkSizes> {
         #[derive(Deserialize)]
         struct Raw {
             chart: BTreeMap<String, ChunkSize>,
             asset: BTreeMap<String, ChunkSize>,
         }
-        let raw: Raw = match self.get("/api/pre/sizes").await {
-            Ok(resp) => resp.json().await?,
-            Err(Error::Status { status: 404, .. }) => return Ok(None),
-            Err(e) => return Err(e),
-        };
+        let raw: Raw = self.get("/api/pre/sizes").await?.json().await?;
         let keyed = |map: BTreeMap<String, ChunkSize>| {
             map.into_iter()
                 .map(|(k, v)| {
@@ -423,10 +410,10 @@ impl Api {
                 })
                 .collect::<Result<BTreeMap<_, _>>>()
         };
-        Ok(Some(ChunkSizes {
+        Ok(ChunkSizes {
             chart: keyed(raw.chart)?,
             asset: keyed(raw.asset)?,
-        }))
+        })
     }
 
     pub async fn manifest_hash(&self) -> Result<BTreeMap<u32, String>> {

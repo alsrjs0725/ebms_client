@@ -52,11 +52,6 @@ impl Paths {
         self.charts().join(chunk_name("chart_chunk", id, sha256))
     }
 
-    /// 해시 없는 이전 이름. 옮기기용.
-    pub fn legacy_chart_chunk(&self, id: u32) -> PathBuf {
-        self.charts().join(format!("chart_chunk_{id:05}.zip"))
-    }
-
     /// 사전 청크(곡들의 배너·프리뷰 등). 캐시와 달리 지우지 않는다.
     pub fn pre(&self) -> PathBuf {
         self.root.join("pre")
@@ -64,10 +59,6 @@ impl Paths {
 
     pub fn pre_chunk(&self, id: u32, sha256: &str) -> PathBuf {
         self.pre().join(chunk_name("pre_chunk", id, sha256))
-    }
-
-    pub fn legacy_pre_chunk(&self, id: u32) -> PathBuf {
-        self.pre().join(format!("pre_chunk_{id:05}.zip"))
     }
 
     pub fn cache(&self) -> PathBuf {

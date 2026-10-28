@@ -1,9 +1,8 @@
-//! 등록된 서버 전체를 관리한다. 상주 앱과 CLI `mount`가 쓴다.
+//! 연결한 서버(하나)를 관리한다. 상주 앱이 쓴다.
 //!
-//! 서버마다 [`Client`]와 가상 FS를 열어 [`Drive`]에 서버별 최상위 폴더로 넣는다.
-//! 서버 추가·삭제, 로그인·로그아웃, 동기화를 서버별로 따로 한다. 한 서버의 오류는 다른 서버에 영향을 주지 않는다.
+//! 서버의 [`Client`]와 가상 FS를 열어 [`Drive`]에 서버 이름 폴더로 넣는다.
+//! 서버 추가·삭제, 로그인·로그아웃, 동기화를 한다.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,7 +13,7 @@ use tracing::warn;
 
 use crate::api::{Api, Me, User};
 use crate::auth::LoginRequest;
-use crate::config::{AppDir, Config, ServerEntry, is_insecure_url, normalize_url};
+use crate::config::{AppDir, Config, ServerEntry, is_insecure_url};
 use crate::drive::Drive;
 use crate::fs::EbmsFs;
 use crate::openlog::OpenLog;
@@ -32,7 +31,7 @@ pub struct Server {
     status: Mutex<SyncStatus>,
     /// 같은 서버의 동기화가 겹치지 않게
     sync_lock: tokio::sync::Mutex<()>,
-    /// 목록에서 빠짐. 이미 시작한 동기화 묶음이 지운 폴더에 다시 쓰지 않게 한다.
+    /// 설정에서 빠짐. 이미 시작한 동기화 묶음이 지운 폴더에 다시 쓰지 않게 한다.
     removed: AtomicBool,
 }
 
@@ -272,7 +271,7 @@ impl Server {
 
 struct State {
     config: Config,
-    servers: BTreeMap<String, Arc<Server>>,
+    server: Option<Arc<Server>>,
 }
 
 pub struct Hub {
@@ -288,7 +287,7 @@ pub struct Hub {
 }
 
 impl Hub {
-    /// 설정을 읽고 등록된 서버를 모두 연다. 열지 못한 서버는 로그만 남기고 건너뛴다.
+    /// 설정을 읽고 연결한 서버를 연다. 열지 못하면 로그만 남기고 서버 없이 연다.
     /// 키체인을 읽으므로 tokio 런타임 밖에서 부른다. `rt`는 다운로드를 돌릴 런타임.
     pub fn open(dir: AppDir, use_keyring: bool, rt: Handle) -> Result<Self> {
         let config = dir.load_config()?;
@@ -302,11 +301,11 @@ impl Hub {
             open_log: OpenLog::default(),
             state: Mutex::new(State {
                 config: config.clone(),
-                servers: BTreeMap::new(),
+                server: None,
             }),
         };
-        for entry in &config.servers {
-            match hub.open_server(entry) {
+        if let Some(entry) = &config.server {
+            match open_server(&hub.dir, use_keyring, &hub.rt, entry, config.cache_limit()) {
                 Ok(server) => hub.insert(server),
                 Err(e) => warn!(server = %entry.name, %e, "could not open server"),
             }
@@ -314,15 +313,10 @@ impl Hub {
         Ok(hub)
     }
 
-    fn open_server(&self, entry: &ServerEntry) -> Result<Arc<Server>> {
-        let cache_limit = self.config().cache_limit();
-        open_server(&self.dir, self.use_keyring, &self.rt, entry, cache_limit)
-    }
-
     fn insert(&self, server: Arc<Server>) {
         self.drive
-            .insert(&server.entry.id, &server.entry.name, server.fs.clone());
-        self.lock().servers.insert(server.entry.id.clone(), server);
+            .set(&server.entry.id, &server.entry.name, server.fs.clone());
+        self.lock().server = Some(server);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -338,7 +332,7 @@ impl Hub {
         self.rt.clone()
     }
 
-    /// 서버별 최상위 폴더로 합친 가상 드라이브.
+    /// 서버 이름 폴더를 둔 가상 드라이브.
     pub fn drive(&self) -> Arc<Drive> {
         self.drive.clone()
     }
@@ -368,7 +362,7 @@ impl Hub {
         Ok(config)
     }
 
-    /// 서버별 캐시 한도(GB)를 바꿔 저장하고, 줄었으면 넘는 만큼 오래 안 쓴 곡부터 지운다.
+    /// 캐시 한도(GB)를 바꿔 저장하고, 줄었으면 넘는 만큼 오래 안 쓴 곡부터 지운다.
     pub async fn set_cache_limit_gb(&self, gb: u64) -> Result<()> {
         if gb == 0 {
             return Err(Error::Config("cache limit must be at least 1 GB".into()));
@@ -376,7 +370,7 @@ impl Hub {
         let limit = self
             .update_config(|c| c.cache_limit_gb = Some(gb))?
             .cache_limit();
-        for server in self.servers() {
+        if let Some(server) = self.server() {
             let cache = server.client.fetcher.cache().clone();
             cache.set_limit(limit);
             let evicted = tokio::task::spawn_blocking(move || cache.evict())
@@ -390,32 +384,25 @@ impl Hub {
         Ok(())
     }
 
-    /// 설정 순서대로.
-    pub fn servers(&self) -> Vec<Arc<Server>> {
-        let state = self.lock();
-        state
-            .config
-            .servers
-            .iter()
-            .filter_map(|e| state.servers.get(&e.id).cloned())
-            .collect()
+    /// 연결한 서버. 없으면 None.
+    pub fn server(&self) -> Option<Arc<Server>> {
+        self.lock().server.clone()
     }
 
-    pub fn server(&self, id: &str) -> Result<Arc<Server>> {
-        self.lock()
-            .servers
-            .get(id)
-            .cloned()
-            .ok_or_else(|| Error::Config(format!("unknown server: {id}")))
+    fn require(&self) -> Result<Arc<Server>> {
+        self.server()
+            .ok_or_else(|| Error::Config("no server added yet".into()))
     }
 
     pub fn session(&self, entry: &ServerEntry) -> SessionStore {
         SessionStore::new(&entry.url, &self.dir.server_dir(entry), self.use_keyring)
     }
 
-    /// `/api/version`으로 EBMS 서버인지 확인하고 추가한다.
+    /// `/api/version`으로 EBMS 서버인지 확인하고 연결한다. 이미 연결한 서버가 있으면 오류(먼저 뺀다).
     pub async fn add(&self, url: &str, name: Option<&str>) -> Result<Arc<Server>> {
-        let url = normalize_url(url)?;
+        let mut config = self.config();
+        let entry = config.set_server(url, name)?.clone();
+        let url = entry.url.clone();
         if is_insecure_url(&url) {
             warn!(%url, "adding an unencrypted http server, session key will be sent in plain text");
         }
@@ -423,11 +410,9 @@ impl Hub {
             .version()
             .await
             .map_err(|e| Error::Config(format!("{url} is not a reachable EBMS server ({e})")))?;
-        if !crate::API_VERSIONS.contains(&version.api) {
+        if version.api != crate::API_VERSION {
             return Err(Error::ApiVersion(version.api));
         }
-        let mut config = self.config();
-        let entry = config.add(&url, name)?.clone();
         let server = {
             let (dir, rt, entry) = (self.dir.clone(), self.rt.clone(), entry.clone());
             let use_keyring = self.use_keyring;
@@ -438,22 +423,20 @@ impl Hub {
             .await
             .map_err(|e| Error::Other(e.to_string()))??
         };
-        self.update_config(|c| c.servers.push(entry.clone()))?;
+        self.update_config(|c| c.server = Some(entry))?;
         self.insert(server.clone());
         Ok(server)
     }
 
-    /// 로그아웃하고 목록에서 뺀다. `purge`면 로컬 데이터(인덱스·차트·캐시)도 지운다.
+    /// 로그아웃하고 서버를 뺀다. `purge`면 로컬 데이터(인덱스·차트·캐시)도 지운다.
     /// 쓰는 중이라 다 못 지운 파일은 다음에 앱을 열 때 지운다.
-    pub async fn remove(&self, id: &str, purge: bool) -> Result<ServerEntry> {
-        let server = self.server(id)?;
+    pub async fn remove(&self, purge: bool) -> Result<ServerEntry> {
+        let server = self.require()?;
         let entry = server.entry.clone();
-        self.logout(id).await?;
-        self.update_config(|c| {
-            c.remove(id);
-        })?;
-        self.drive.remove(id);
-        self.lock().servers.remove(id);
+        self.logout().await?;
+        self.update_config(|c| c.server = None)?;
+        self.drive.clear();
+        self.lock().server = None;
         // 진행 중인 동기화가 끝나길 기다리고 새 동기화는 막는다. 그래야 인덱스 DB 등 파일이 닫혀
         // 지울 수 있고(Windows는 열린 파일을 못 지움), 지운 폴더에 동기화가 다시 쓰지 않는다.
         server.removed.store(true, Ordering::SeqCst);
@@ -469,13 +452,8 @@ impl Hub {
     }
 
     /// 브라우저 로그인. `open_browser`에 로그인 주소를 넘긴다. 받은 세션키는 저장하고 바로 쓴다.
-    pub async fn login(
-        &self,
-        id: &str,
-        timeout: Duration,
-        open_browser: impl FnOnce(&str),
-    ) -> Result<User> {
-        let server = self.server(id)?;
+    pub async fn login(&self, timeout: Duration, open_browser: impl FnOnce(&str)) -> Result<User> {
+        let server = self.require()?;
         // 진행 중인 요청이 새 세션키를 덮어쓰지 않도록 따로 받는다.
         let api = Api::new(&server.entry.url)?;
         let req = LoginRequest::start(&api).await?;
@@ -491,8 +469,8 @@ impl Hub {
     }
 
     /// 서버에서 세션을 폐기하고 저장된 세션키를 지운다. 서버에 닿지 않아도 로컬 세션키는 지운다.
-    pub async fn logout(&self, id: &str) -> Result<()> {
-        let server = self.server(id)?;
+    pub async fn logout(&self) -> Result<()> {
+        let server = self.require()?;
         if server.api().has_session()
             && let Err(e) = server.api().logout().await
         {
@@ -506,26 +484,22 @@ impl Hub {
     }
 
     /// 계정 정보. 로그인하지 않았으면 None.
-    pub async fn me(&self, id: &str) -> Result<Option<Me>> {
-        let server = self.server(id)?;
+    pub async fn me(&self) -> Result<Option<Me>> {
+        let server = self.require()?;
         if !server.api().has_session() {
             return Ok(None);
         }
         server.api().me().await.map(Some)
     }
 
-    /// 로그인된 서버를 모두 동기화한다. 실패는 서버별 상태에만 남긴다.
-    pub async fn sync_all(&self) {
-        let servers = self.servers();
-        let jobs = servers
-            .iter()
-            .filter(|s| !s.api().needs_login())
-            .map(|s| async move {
-                if let Err(e) = s.sync().await {
-                    warn!(server = %s.entry.name, %e, "sync failed");
-                }
-            });
-        futures_util::future::join_all(jobs).await;
+    /// 로그인돼 있으면 동기화한다. 실패는 서버 상태에만 남긴다.
+    pub async fn sync(&self) {
+        let Some(server) = self.server().filter(|s| !s.api().needs_login()) else {
+            return;
+        };
+        if let Err(e) = server.sync().await {
+            warn!(server = %server.entry.name, %e, "sync failed");
+        }
     }
 }
 

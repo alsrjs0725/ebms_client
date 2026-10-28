@@ -34,24 +34,10 @@ pub struct AppState {
 }
 
 fn main() {
-    let (root, migrated) = match std::env::var_os("EBMS_DATA") {
-        Some(d) => (Some(PathBuf::from(d)), Ok(false)),
-        None => {
-            let root = AppDir::default_root();
-            let migrated = match (&root, AppDir::legacy_root()) {
-                (Some(root), Some(old)) => AppDir::new(root).migrate_from(&old),
-                _ => Ok(false),
-            };
-            (root, migrated)
-        }
-    };
-    // 옮긴 뒤에 로그를 연다. 로그 폴더가 먼저 생기면 폴더째 옮기지 못한다.
+    let root = std::env::var_os("EBMS_DATA")
+        .map(PathBuf::from)
+        .or_else(AppDir::default_root);
     let log_dir = logging::init(root.as_deref());
-    match migrated {
-        Ok(true) => tracing::info!(?root, "moved app data from the old location"),
-        Ok(false) => {}
-        Err(e) => tracing::warn!(%e, "could not move app data from the old location"),
-    }
 
     if let Err(e) = run(root, log_dir) {
         tracing::error!("{e}");
@@ -87,7 +73,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
         })
         .manage(update::Update::default())
         .invoke_handler(tauri::generate_handler![
-            commands::list_servers,
+            commands::server_info,
             commands::add_server,
             commands::remove_server,
             commands::clear_cache,
@@ -126,7 +112,7 @@ fn run(root: Option<PathBuf>, log_dir: Option<PathBuf>) -> Result<(), Box<dyn st
             // 자동 동기화는 켜질 때 한 번만 한다. 동기화 트래픽도 사전 다운로드 한도에서 빠지므로
             // 실행 중 주기적으로 다시 받지 않는다. 그 뒤로는 "지금 동기화"로만 받는다.
             let hub = hub.clone();
-            tauri::async_runtime::spawn(async move { hub.sync_all().await });
+            tauri::async_runtime::spawn(async move { hub.sync().await });
             build_settings(app.handle())?;
             notices::check_on_start(app.handle(), state.hub.clone());
             update::check_on_start(app.handle());
