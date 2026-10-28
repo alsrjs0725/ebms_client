@@ -1,22 +1,22 @@
-//! 서버 공지. 상주 앱이 켜질 때 서버마다 `GET /api/notices`를 확인해 아직 확인하지 않은 공지를 띄운다.
+//! 서버 공지. 상주 앱이 켜질 때 `GET /api/notices`를 확인해 아직 확인하지 않은 공지를 띄운다.
 //!
 //! 확인한 공지는 앱 데이터 폴더의 `notices_seen.json`에 서버별 `id:updated_at`으로 남긴다.
 //! 서버에서 공지를 고치면 `updated_at`이 바뀌어 다시 띄운다. 게시가 끝난 공지의 기록은 다음 확인 때 지운다.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::Result;
 use crate::api::Notice;
 use crate::config::AppDir;
 use crate::hub::Server;
+use crate::{Error, Result};
 
-/// 서버 하나의 아직 확인하지 않은 공지.
+/// 서버의 아직 확인하지 않은 공지.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerNotices {
     pub server_id: String,
@@ -90,53 +90,31 @@ impl NoticeStore {
     }
 
     /// 사용자가 확인한 공지를 남긴다.
-    pub fn mark_seen(&self, notices: &[ServerNotices]) -> Result<()> {
+    pub fn mark_seen(&self, shown: &ServerNotices) -> Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut seen = self.load();
-        for s in notices {
-            seen.entry(s.server_id.clone())
-                .or_default()
-                .extend(s.notices.iter().map(key));
-        }
+        seen.entry(shown.server_id.clone())
+            .or_default()
+            .extend(shown.notices.iter().map(key));
         self.save(&seen)
     }
 }
 
-/// 서버마다 공지를 확인한다. (확인하지 않은 공지가 있는 서버, 닿지 않은 서버)
+/// 서버의 공지 중 확인하지 않은 것. 없으면 None, 서버에 닿지 않으면 오류.
 pub async fn check(
     store: &NoticeStore,
-    servers: Vec<Arc<Server>>,
+    server: &Server,
     timeout: Duration,
-) -> (Vec<ServerNotices>, Vec<Arc<Server>>) {
-    let jobs = servers.into_iter().map(|server| async move {
-        let result = tokio::time::timeout(timeout, server.api().notices()).await;
-        (server, result)
-    });
-    let mut found = Vec::new();
-    let mut failed = Vec::new();
-    for (server, result) in futures_util::future::join_all(jobs).await {
-        match result {
-            Ok(Ok(active)) => {
-                let notices = store.unseen(&server.entry.id, &active);
-                if !notices.is_empty() {
-                    found.push(ServerNotices {
-                        server_id: server.entry.id.clone(),
-                        server_name: server.entry.name.clone(),
-                        notices,
-                    });
-                }
-            }
-            Ok(Err(e)) => {
-                warn!(server = %server.entry.name, %e, "could not check notices");
-                failed.push(server);
-            }
-            Err(_) => {
-                warn!(server = %server.entry.name, "notice check timed out");
-                failed.push(server);
-            }
-        }
-    }
-    (found, failed)
+) -> Result<Option<ServerNotices>> {
+    let active = tokio::time::timeout(timeout, server.api().notices())
+        .await
+        .map_err(|_| Error::Other("notice check timed out".into()))??;
+    let notices = store.unseen(&server.entry.id, &active);
+    Ok((!notices.is_empty()).then(|| ServerNotices {
+        server_id: server.entry.id.clone(),
+        server_name: server.entry.name.clone(),
+        notices,
+    }))
 }
 
 #[cfg(test)]
@@ -161,11 +139,11 @@ mod tests {
         assert_eq!(store.unseen("a", &active), active);
 
         store
-            .mark_seen(&[ServerNotices {
+            .mark_seen(&ServerNotices {
                 server_id: "a".into(),
                 server_name: "A".into(),
                 notices: active.clone(),
-            }])
+            })
             .unwrap();
         assert!(store.unseen("a", &active).is_empty());
         // 다른 서버와는 따로

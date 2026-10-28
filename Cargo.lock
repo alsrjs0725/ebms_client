@@ -1141,7 +1141,6 @@ version = "0.1.2"
 dependencies = [
  "ebms-core",
  "ebms-vfs-winfsp",
- "futures-util",
  "open",
  "serde",
  "tauri",

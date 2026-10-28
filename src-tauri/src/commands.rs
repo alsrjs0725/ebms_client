@@ -26,9 +26,16 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// 연결한 서버. 없으면 창에 보여줄 오류.
+fn server(state: &AppState) -> CmdResult<Arc<Server>> {
+    state
+        .hub
+        .server()
+        .ok_or_else(|| "서버를 먼저 추가해 주세요".into())
+}
+
 #[derive(Serialize)]
 pub struct ServerView {
-    id: String,
     name: String,
     url: String,
     /// 루프백이 아닌 `http://` 주소. 세션키가 평문으로 오가므로 경고한다.
@@ -79,7 +86,6 @@ async fn view(server: Arc<Server>) -> ServerView {
         }
     };
     ServerView {
-        id: server.entry.id.clone(),
         name: server.entry.name.clone(),
         url: server.entry.url.clone(),
         insecure: server.entry.is_insecure(),
@@ -96,10 +102,13 @@ async fn view(server: Arc<Server>) -> ServerView {
     }
 }
 
+/// 연결한 서버. 없으면 None.
 #[tauri::command]
-pub async fn list_servers(state: State<'_, AppState>) -> CmdResult<Vec<ServerView>> {
-    let jobs = state.hub.servers().into_iter().map(view);
-    Ok(futures_util::future::join_all(jobs).await)
+pub async fn server_info(state: State<'_, AppState>) -> CmdResult<Option<ServerView>> {
+    Ok(match state.hub.server() {
+        Some(server) => Some(view(server).await),
+        None => None,
+    })
 }
 
 #[tauri::command]
@@ -113,53 +122,48 @@ pub async fn add_server(
 }
 
 #[tauri::command]
-pub async fn remove_server(state: State<'_, AppState>, id: String, purge: bool) -> CmdResult<()> {
-    state.hub.remove(&id, purge).await.map_err(err)?;
+pub async fn remove_server(state: State<'_, AppState>, purge: bool) -> CmdResult<()> {
+    state.hub.remove(purge).await.map_err(err)?;
     Ok(())
 }
 
 /// 서버의 캐시를 비운다. 지운 바이트 수.
 #[tauri::command]
-pub async fn clear_cache(state: State<'_, AppState>, id: String) -> CmdResult<u64> {
-    let server = state.hub.server(&id).map_err(err)?;
+pub async fn clear_cache(state: State<'_, AppState>) -> CmdResult<u64> {
+    let server = server(&state)?;
     server.clear_cache().await.map_err(err)
 }
 
 /// 브라우저로 로그인하고, 끝나면 바로 동기화를 시작한다.
 #[tauri::command]
-pub async fn login(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+pub async fn login(state: State<'_, AppState>) -> CmdResult<()> {
     let hub = state.hub.clone();
-    hub.login(&id, LOGIN_TIMEOUT, |url| {
+    hub.login(LOGIN_TIMEOUT, |url| {
         if let Err(e) = open::that_detached(url) {
             tracing::warn!(%e, url, "could not open browser");
         }
     })
     .await
     .map_err(err)?;
-    let server = hub.server(&id).map_err(err)?;
-    tauri::async_runtime::spawn(async move {
-        if let Err(e) = server.sync().await {
-            tracing::warn!(server = %server.entry.name, %e, "sync failed");
-        }
-    });
+    tauri::async_runtime::spawn(async move { hub.sync().await });
     Ok(())
 }
 
 #[tauri::command]
-pub async fn logout(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    state.hub.logout(&id).await.map_err(err)
+pub async fn logout(state: State<'_, AppState>) -> CmdResult<()> {
+    state.hub.logout().await.map_err(err)
 }
 
 /// OAuth 연결 관리는 웹 `/account`에서 한다.
 #[tauri::command]
-pub fn open_account(state: State<'_, AppState>, id: String) -> CmdResult<()> {
-    let server = state.hub.server(&id).map_err(err)?;
+pub fn open_account(state: State<'_, AppState>) -> CmdResult<()> {
+    let server = server(&state)?;
     open::that_detached(format!("{}/account", server.entry.url)).map_err(err)
 }
 
 #[tauri::command]
-pub async fn sync_now(state: State<'_, AppState>, id: String) -> CmdResult<SyncStatus> {
-    let server = state.hub.server(&id).map_err(err)?;
+pub async fn sync_now(state: State<'_, AppState>) -> CmdResult<SyncStatus> {
+    let server = server(&state)?;
     server.sync().await.map_err(err)?;
     Ok(server.sync_status())
 }
@@ -173,8 +177,8 @@ pub struct PreTablesView {
 
 /// 서버의 난이도표 목록과 지금 고른 사전 다운로드 범위.
 #[tauri::command]
-pub async fn pre_tables(state: State<'_, AppState>, id: String) -> CmdResult<PreTablesView> {
-    let server = state.hub.server(&id).map_err(err)?;
+pub async fn pre_tables(state: State<'_, AppState>) -> CmdResult<PreTablesView> {
+    let server = server(&state)?;
     let tables = server.api().pre_tables().await.map_err(err)?;
     Ok(PreTablesView {
         tables: tables.tables,
@@ -186,10 +190,9 @@ pub async fn pre_tables(state: State<'_, AppState>, id: String) -> CmdResult<Pre
 #[tauri::command]
 pub async fn set_pre_tables(
     state: State<'_, AppState>,
-    id: String,
     selected: Option<Vec<u32>>,
 ) -> CmdResult<SyncStatus> {
-    let server = state.hub.server(&id).map_err(err)?;
+    let server = server(&state)?;
     server.set_pre_tables(selected.as_deref()).map_err(err)?;
     server.sync().await.map_err(err)?;
     Ok(server.sync_status())
@@ -197,11 +200,8 @@ pub async fn set_pre_tables(
 
 /// 연결한 개인 채보 목록.
 #[tauri::command]
-pub async fn personal_charts(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<Vec<LinkedChart>> {
-    let server = state.hub.server(&id).map_err(err)?;
+pub async fn personal_charts(state: State<'_, AppState>) -> CmdResult<Vec<LinkedChart>> {
+    let server = server(&state)?;
     tokio::task::spawn_blocking(move || server.personal_charts())
         .await
         .map_err(err)?
@@ -210,12 +210,8 @@ pub async fn personal_charts(
 
 /// 개인 채보를 연결할 곡 찾기.
 #[tauri::command]
-pub async fn search_songs(
-    state: State<'_, AppState>,
-    id: String,
-    query: String,
-) -> CmdResult<Vec<SongHit>> {
-    let server = state.hub.server(&id).map_err(err)?;
+pub async fn search_songs(state: State<'_, AppState>, query: String) -> CmdResult<Vec<SongHit>> {
+    let server = server(&state)?;
     tokio::task::spawn_blocking(move || server.search_songs(&query))
         .await
         .map_err(err)?
@@ -228,10 +224,9 @@ pub async fn search_songs(
 pub async fn add_personal_charts(
     state: State<'_, AppState>,
     window: tauri::WebviewWindow,
-    id: String,
     song_id: u32,
 ) -> CmdResult<Vec<PersonalChart>> {
-    let server = state.hub.server(&id).map_err(err)?;
+    let server = server(&state)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     window
         .dialog()
@@ -258,11 +253,10 @@ pub async fn add_personal_charts(
 #[tauri::command]
 pub async fn remove_personal_chart(
     state: State<'_, AppState>,
-    id: String,
     song_id: u32,
     name: String,
 ) -> CmdResult<()> {
-    let server = state.hub.server(&id).map_err(err)?;
+    let server = server(&state)?;
     server
         .remove_personal_chart(song_id, name)
         .await
@@ -273,15 +267,12 @@ pub async fn remove_personal_chart(
 /// 지금 동기화하면 받을 용량.
 /// 사전 청크는 난이도표 태그와 함께 줘서 창에서 고르는 표에 맞춰 바로 다시 센다.
 #[tauri::command]
-pub async fn pending_download(
-    state: State<'_, AppState>,
-    id: String,
-) -> CmdResult<PendingDownload> {
-    let server = state.hub.server(&id).map_err(err)?;
+pub async fn pending_download(state: State<'_, AppState>) -> CmdResult<PendingDownload> {
+    let server = server(&state)?;
     server.client.pending_download().await.map_err(err)
 }
 
-/// 서버별 캐시 한도(GB).
+/// 캐시 한도(GB).
 #[tauri::command]
 pub fn cache_limit_gb(state: State<'_, AppState>) -> u64 {
     state.hub.config().cache_limit_gb()

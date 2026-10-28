@@ -1,17 +1,13 @@
-//! 여러 서버를 하나의 가상 드라이브로 합친다. 서버마다 최상위 폴더 하나를 둔다.
+//! 연결한 서버의 곡을 서버 이름 폴더 하나 아래에 보여주는 가상 드라이브.
 //!
 //! ```text
-//! E:\ (또는 ~/ebms)
-//! ├─ 서버 A\00123 Artist - Title\...
-//! └─ 서버 B\00007 Other - Song\...
+//! E:\
+//! └─ 서버 이름\00123 Artist - Title\...
 //! ```
 //!
-//! 같은 곡이 여러 서버에 있어도 합치지 않는다. 한 서버가 꺼지거나 세션이 만료돼도 다른 서버는 그대로다.
-//!
 //! ino는 `(slot << SLOT_SHIFT) | 서버 안의 ino`. 루트는 slot 0의 [`ROOT`].
-//! slot은 서버 id별로 정해 두고 다시 쓰지 않으므로 서버를 빼고 넣어도 다른 서버의 ino는 그대로다.
+//! 서버를 넣을 때마다 slot을 새로 정하므로 다른 서버로 바꿔도 예전 서버의 ino가 새 서버의 파일을 가리키지 않는다.
 
-use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
 use crate::fs::{Attr, Caller, DirEntry, Kind, ReadDone, ReadOnlyFs};
@@ -29,31 +25,16 @@ struct Member {
 }
 
 #[derive(Default)]
-struct Members {
-    /// 서버 id → 멤버
-    by_id: BTreeMap<String, Member>,
-    /// 서버 id → slot. 빠진 서버의 slot도 남겨 둔다.
-    slots: HashMap<String, Ino>,
+struct State {
+    member: Option<Member>,
+    /// 마지막으로 쓴 slot
+    last_slot: Ino,
 }
 
-impl Members {
-    fn by_slot(&self, slot: Ino) -> Option<&Member> {
-        self.by_id.values().find(|m| m.slot == slot)
-    }
-
-    fn by_dir(&self, name: &str) -> Option<&Member> {
-        let mut members = self.by_id.values();
-        members
-            .clone()
-            .find(|m| m.dir == name)
-            .or_else(|| members.find(|m| m.dir.eq_ignore_ascii_case(name)))
-    }
-}
-
-/// 서버별 최상위 폴더로 합친 드라이브.
+/// 서버 폴더 하나를 둔 드라이브.
 #[derive(Default)]
 pub struct Drive {
-    members: RwLock<Members>,
+    state: RwLock<State>,
 }
 
 impl Drive {
@@ -61,29 +42,25 @@ impl Drive {
         Self::default()
     }
 
-    /// 서버를 넣는다. 같은 id가 있으면 바꾼다. `name`은 최상위 폴더 이름이 된다.
-    pub fn insert(&self, id: &str, name: &str, fs: Arc<dyn ReadOnlyFs>) {
-        let mut m = self.members.write().unwrap_or_else(|e| e.into_inner());
-        let next = m.slots.values().max().copied().unwrap_or(0) + 1;
-        let slot = *m.slots.entry(id.to_string()).or_insert(next);
-        let dir = folder_name(name, id);
-        m.by_id.insert(id.to_string(), Member { dir, slot, fs });
+    /// 서버를 넣는다(있던 서버는 뺀다). `name`은 최상위 폴더 이름이 된다.
+    pub fn set(&self, id: &str, name: &str, fs: Arc<dyn ReadOnlyFs>) {
+        let mut s = self.state.write().unwrap_or_else(|e| e.into_inner());
+        s.last_slot += 1;
+        let slot = s.last_slot;
+        s.member = Some(Member {
+            dir: folder_name(name, id),
+            slot,
+            fs,
+        });
     }
 
-    pub fn remove(&self, id: &str) {
-        let mut m = self.members.write().unwrap_or_else(|e| e.into_inner());
-        m.by_id.remove(id);
-    }
-
-    /// 들어 있는 서버 id 목록.
-    pub fn ids(&self) -> Vec<String> {
-        let m = self.members.read().unwrap_or_else(|e| e.into_inner());
-        m.by_id.keys().cloned().collect()
+    pub fn clear(&self) {
+        self.state.write().unwrap_or_else(|e| e.into_inner()).member = None;
     }
 
     fn member(&self, ino: Ino) -> Option<(Arc<dyn ReadOnlyFs>, Ino)> {
-        let m = self.members.read().unwrap_or_else(|e| e.into_inner());
-        let member = m.by_slot(ino >> SLOT_SHIFT)?;
+        let s = self.state.read().unwrap_or_else(|e| e.into_inner());
+        let member = s.member.as_ref().filter(|m| m.slot == ino >> SLOT_SHIFT)?;
         Some((member.fs.clone(), member.slot))
     }
 }
@@ -127,8 +104,11 @@ impl ReadOnlyFs for Drive {
     fn lookup(&self, parent: Ino, name: &str) -> Option<Attr> {
         if parent == ROOT {
             let (fs, slot) = {
-                let m = self.members.read().unwrap_or_else(|e| e.into_inner());
-                let member = m.by_dir(name)?;
+                let s = self.state.read().unwrap_or_else(|e| e.into_inner());
+                let member = s
+                    .member
+                    .as_ref()
+                    .filter(|m| m.dir.eq_ignore_ascii_case(name))?;
                 (member.fs.clone(), member.slot)
             };
             return fs.getattr(ROOT).map(|a| lift(slot, a));
@@ -151,22 +131,16 @@ impl ReadOnlyFs for Drive {
 
     fn readdir_from(&self, ino: Ino, offset: usize, add: &mut dyn FnMut(DirEntry) -> bool) -> bool {
         if ino == ROOT {
-            let mut entries: Vec<DirEntry> = {
-                let m = self.members.read().unwrap_or_else(|e| e.into_inner());
-                m.by_id
-                    .values()
-                    .map(|member| DirEntry {
-                        ino: outer(member.slot, ROOT),
-                        name: member.dir.clone(),
-                        kind: Kind::Dir,
-                    })
-                    .collect()
+            let entry = {
+                let s = self.state.read().unwrap_or_else(|e| e.into_inner());
+                s.member.as_ref().map(|m| DirEntry {
+                    ino: outer(m.slot, ROOT),
+                    name: m.dir.clone(),
+                    kind: Kind::Dir,
+                })
             };
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            for e in entries.into_iter().skip(offset) {
-                if add(e) {
-                    break;
-                }
+            if let Some(e) = entry.filter(|_| offset == 0) {
+                add(e);
             }
             return true;
         }
@@ -270,10 +244,10 @@ mod tests {
     }
 
     #[test]
-    fn servers_are_top_level_folders() {
+    fn server_is_a_top_level_folder() {
         let drive = Drive::new();
-        drive.insert("a", "Server A", Arc::new(Fake("from a")));
-        drive.insert("b", "B:/x", Arc::new(Fake("from b")));
+        assert!(drive.readdir(ROOT).unwrap().is_empty());
+        drive.set("b", "B:/x", Arc::new(Fake("from b")));
 
         let names: Vec<String> = drive
             .readdir(ROOT)
@@ -281,14 +255,12 @@ mod tests {
             .into_iter()
             .map(|e| e.name)
             .collect();
-        assert_eq!(names, ["B__x", "Server A"]);
-
-        assert_eq!(read_all(&drive, "Server A/song/a.txt"), "from a");
+        assert_eq!(names, ["B__x"]);
         assert_eq!(read_all(&drive, "b__x/song/a.txt"), "from b");
-        assert!(drive.resolve("Server A/missing").is_none());
+        assert!(drive.resolve("B__x/missing").is_none());
 
         // 부모를 따라 올라가면 루트
-        let file = drive.resolve("Server A/song/a.txt").unwrap().ino;
+        let file = drive.resolve("B__x/song/a.txt").unwrap().ino;
         let song = drive.parent(file).unwrap();
         let top = drive.parent(song).unwrap();
         assert_eq!(drive.parent(top), Some(ROOT));
@@ -296,24 +268,19 @@ mod tests {
     }
 
     #[test]
-    fn inodes_stay_when_servers_change() {
+    fn switching_servers_changes_inodes() {
         let drive = Drive::new();
-        drive.insert("a", "A", Arc::new(Fake("a")));
-        drive.insert("b", "B", Arc::new(Fake("b")));
-        let before = drive.resolve("B/song/a.txt").unwrap().ino;
+        drive.set("a", "A", Arc::new(Fake("a")));
+        let old = drive.resolve("A/song/a.txt").unwrap().ino;
 
-        drive.remove("a");
+        drive.set("b", "B", Arc::new(Fake("b")));
         assert!(drive.resolve("A").is_none());
-        assert_eq!(drive.resolve("B/song/a.txt").unwrap().ino, before);
-        assert!(drive.getattr(outer(1, FILE)).is_none());
+        assert!(drive.getattr(old).is_none());
+        assert_eq!(read_all(&drive, "B/song/a.txt"), "b");
+        assert_ne!(drive.resolve("B/song/a.txt").unwrap().ino, old);
 
-        drive.insert("c", "C", Arc::new(Fake("c")));
-        drive.insert("a", "A", Arc::new(Fake("a2")));
-        assert_eq!(read_all(&drive, "A/song/a.txt"), "a2");
-        assert_ne!(
-            drive.resolve("C/song/a.txt").unwrap().ino,
-            drive.resolve("A/song/a.txt").unwrap().ino
-        );
-        assert_eq!(drive.ids(), ["a", "b", "c"]);
+        drive.clear();
+        assert!(drive.resolve("B").is_none());
+        assert!(drive.readdir(ROOT).unwrap().is_empty());
     }
 }

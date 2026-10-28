@@ -1,4 +1,4 @@
-// 설정 창. 서버 목록·로그인·계정 정보·캐시·가상 드라이브 위치·구동기.
+// 설정 창. 서버·로그인·계정 정보·캐시·가상 드라이브 위치·구동기.
 // 서버가 보낸 문자열은 모두 textContent로만 넣는다.
 "use strict";
 
@@ -14,17 +14,17 @@ const LOGIN_LABELS = {
 const REFRESH_MS = 30_000;
 const INSECURE_TEXT = "암호화되지 않은 http 주소입니다. 세션키가 평문으로 전송됩니다.";
 
-/** 진행 중인 로그인 (서버 id) */
-const loggingIn = new Set();
-/** 사전 다운로드 범위 창에서 고르는 중인 서버 */
-let preServer = null;
-/** 개인 채보 창을 연 서버 */
-let personalServer = null;
+/** 브라우저에서 로그인하는 중 */
+let loggingIn = false;
+/** 사전 다운로드 범위 창이 열려 있음 */
+let preOpen = false;
+/** 개인 채보 창이 열려 있음 */
+let personalOpen = false;
 const SEARCH_DELAY_MS = 200;
 /** 사전 다운로드 범위 창에서 쓰는 받을 용량(`pending_download`). 계산 중이면 "loading", 세지 못했으면 null */
 let prePending = null;
-/** 서버 카드에 보여 줄 받을 용량. 서버 id → { key, at, value } */
-const pendingCache = new Map();
+/** 서버 카드에 보여 줄 받을 용량 { key, at, value } */
+let pendingCache = null;
 const PENDING_TTL_MS = 5 * 60_000;
 
 function showMessage(text, kind = "error") {
@@ -101,7 +101,7 @@ function renderServer(s) {
   li.querySelector(".insecure").hidden = !s.insecure;
 
   const badge = li.querySelector(".badge");
-  badge.textContent = loggingIn.has(s.id) ? "브라우저에서 로그인 중…" : LOGIN_LABELS[s.login];
+  badge.textContent = loggingIn ? "브라우저에서 로그인 중…" : LOGIN_LABELS[s.login];
   badge.classList.add(s.login);
 
   const dl = li.querySelector(".account");
@@ -172,7 +172,7 @@ function renderServer(s) {
   const linkBtn = li.querySelector(".account-link");
   const syncBtn = li.querySelector(".sync-now");
   loginBtn.hidden = s.login === "logged_in";
-  loginBtn.disabled = loggingIn.has(s.id);
+  loginBtn.disabled = loggingIn;
   logoutBtn.hidden = s.login === "logged_out";
   linkBtn.hidden = s.login !== "logged_in";
   syncBtn.hidden = s.login !== "logged_in";
@@ -183,32 +183,32 @@ function renderServer(s) {
   personalBtn.addEventListener("click", () => run(personalBtn, () => openPersonalDialog(s)));
 
   loginBtn.addEventListener("click", async () => {
-    loggingIn.add(s.id);
+    loggingIn = true;
     showMessage("브라우저에서 로그인해 주세요. 끝나면 이 창으로 돌아오면 됩니다.", "info");
     await refresh();
     try {
-      await invoke("login", { id: s.id });
+      await invoke("login");
       showMessage("");
     } catch (e) {
       showMessage(`로그인하지 못했습니다: ${e}`);
     } finally {
-      loggingIn.delete(s.id);
+      loggingIn = false;
       await refresh();
     }
   });
   logoutBtn.addEventListener("click", () =>
     run(logoutBtn, async () => {
-      await invoke("logout", { id: s.id });
+      await invoke("logout");
       await refresh();
     }),
   );
-  linkBtn.addEventListener("click", () => run(linkBtn, () => invoke("open_account", { id: s.id })));
+  linkBtn.addEventListener("click", () => run(linkBtn, () => invoke("open_account")));
   syncBtn.addEventListener("click", () =>
     run(syncBtn, async () => {
       syncState.textContent = "동기화 중…";
       syncState.className = "sync-state running";
       syncState.hidden = false;
-      await invoke("sync_now", { id: s.id });
+      await invoke("sync_now");
       await refresh();
     }),
   );
@@ -216,7 +216,7 @@ function renderServer(s) {
   clearBtn.disabled = !u || u.cache_bytes === 0;
   confirmClick(clearBtn, "한 번 더 누르면 캐시 비우기", () =>
     run(clearBtn, async () => {
-      const freed = await invoke("clear_cache", { id: s.id });
+      const freed = await invoke("clear_cache");
       showMessage(`${s.name}: 캐시 ${bytes(freed)}를 비웠습니다.`, "info");
       await refresh();
     }),
@@ -224,7 +224,7 @@ function renderServer(s) {
   const removeBtn = li.querySelector(".remove");
   confirmClick(removeBtn, "한 번 더 누르면 삭제 (로컬 데이터는 남김)", () =>
     run(removeBtn, async () => {
-      await invoke("remove_server", { id: s.id, purge: false });
+      await invoke("remove_server", { purge: false });
       await refresh();
     }),
   );
@@ -232,7 +232,7 @@ function renderServer(s) {
   if (u) purgeBtn.textContent = `삭제 + 로컬 데이터 지우기 (${bytes(u.total_bytes)})`;
   confirmClick(purgeBtn, "한 번 더 누르면 삭제하고 로컬 데이터도 지움", () =>
     run(purgeBtn, async () => {
-      await invoke("remove_server", { id: s.id, purge: true });
+      await invoke("remove_server", { purge: true });
       await refresh();
     }),
   );
@@ -257,23 +257,23 @@ function pendingText(p, selected) {
 /** 서버 카드의 받을 용량. 동기화가 끝나면(last_ok_at이 바뀌면) 다시 센다. */
 async function cardPending(s) {
   const key = `${s.sync.last_ok_at}|${JSON.stringify(s.pre_tables)}`;
-  const hit = pendingCache.get(s.id);
+  const hit = pendingCache;
   if (hit && hit.key === key && Date.now() - hit.at < PENDING_TTL_MS) return hit.value;
-  const value = await invoke("pending_download", { id: s.id });
-  pendingCache.set(s.id, { key, at: Date.now(), value });
+  const value = await invoke("pending_download");
+  pendingCache = { key, at: Date.now(), value };
   return value;
 }
 
 /** 사전 다운로드 범위 창. 서버의 난이도표를 받아 고르게 한다. */
 async function openPreDialog(s) {
-  const pendingReq = invoke("pending_download", { id: s.id }).catch(() => null);
-  const view = await invoke("pre_tables", { id: s.id });
-  preServer = s.id;
+  const pendingReq = invoke("pending_download").catch(() => null);
+  const view = await invoke("pre_tables");
+  preOpen = true;
   prePending = "loading";
   $("pre-pending").textContent = "받을 용량을 계산하는 중…";
   $("pre-pending").hidden = false;
   pendingReq.then((p) => {
-    if (preServer !== s.id) return;
+    if (!preOpen) return;
     prePending = p;
     updatePreForm();
   });
@@ -325,18 +325,18 @@ function updatePreForm() {
 $("pre-form").addEventListener("change", updatePreForm);
 
 $("pre-dialog").addEventListener("close", () => {
-  const id = preServer;
-  preServer = null;
+  const wasOpen = preOpen;
+  preOpen = false;
   prePending = null;
-  if ($("pre-dialog").returnValue !== "save" || !id) return;
+  if ($("pre-dialog").returnValue !== "save" || !wasOpen) return;
   const form = $("pre-form");
   const selected =
     form.scope.value === "tables"
       ? [...$("pre-list").querySelectorAll("input:checked")].map((b) => Number(b.value))
       : null;
   showMessage("사전 다운로드 범위를 바꿨습니다. 동기화하는 중입니다…", "info");
-  pendingCache.delete(id);
-  invoke("set_pre_tables", { id, selected })
+  pendingCache = null;
+  invoke("set_pre_tables", { selected })
     .then(() => showMessage("사전 다운로드 범위를 바꾸고 동기화했습니다.", "info"))
     .catch((e) => showMessage(String(e)))
     .finally(() => refresh().catch(() => {}));
@@ -344,7 +344,7 @@ $("pre-dialog").addEventListener("close", () => {
 
 /** 개인 채보 창. 연결한 채보 표와, 곡을 찾아 채보를 연결하는 부분. */
 async function openPersonalDialog(s) {
-  personalServer = s.id;
+  personalOpen = true;
   $("personal-title").textContent = `개인 채보 · ${s.name}`;
   $("personal-search").value = "";
   $("personal-songs").replaceChildren();
@@ -356,9 +356,8 @@ async function openPersonalDialog(s) {
 }
 
 async function refreshPersonal() {
-  const id = personalServer;
-  if (!id) return;
-  const charts = await invoke("personal_charts", { id });
+  if (!personalOpen) return;
+  const charts = await invoke("personal_charts");
   const rows = charts.map((c) => {
     const tr = document.createElement("tr");
     const name = document.createElement("td");
@@ -372,7 +371,7 @@ async function refreshPersonal() {
     remove.textContent = "빼기";
     confirmClick(remove, "한 번 더", () =>
       run(remove, async () => {
-        await invoke("remove_personal_chart", { id, songId: c.song_id, name: c.name });
+        await invoke("remove_personal_chart", { songId: c.song_id, name: c.name });
         await refreshPersonal();
       }),
     );
@@ -392,19 +391,18 @@ $("personal-search").addEventListener("input", () => {
 });
 
 async function searchSongs() {
-  const id = personalServer;
   const query = $("personal-search").value.trim();
   const seq = ++searchSeq;
   $("personal-add").disabled = true;
   const empty = $("personal-songs-empty");
-  if (!id || !query) {
+  if (!personalOpen || !query) {
     $("personal-songs").replaceChildren();
     empty.hidden = true;
     return;
   }
   let hits;
   try {
-    hits = await invoke("search_songs", { id, query });
+    hits = await invoke("search_songs", { query });
   } catch (e) {
     showMessage(String(e));
     return;
@@ -436,13 +434,12 @@ $("personal-songs").addEventListener("change", () => {
 });
 
 $("personal-add").addEventListener("click", () => {
-  const id = personalServer;
   const picked = $("personal-songs").querySelector("input:checked");
-  if (!id || !picked) return;
+  if (!personalOpen || !picked) return;
   const label = picked.parentElement.textContent.trim();
   run($("personal-add"), async () => {
     try {
-      const added = await invoke("add_personal_charts", { id, songId: Number(picked.value) });
+      const added = await invoke("add_personal_charts", { songId: Number(picked.value) });
       if (added.length) {
         showMessage(`${label}에 채보 ${added.length}개를 연결했습니다.`, "info");
       }
@@ -453,14 +450,16 @@ $("personal-add").addEventListener("click", () => {
 });
 
 $("personal-dialog").addEventListener("close", () => {
-  personalServer = null;
+  personalOpen = false;
   refresh().catch(() => {});
 });
 
 async function refresh() {
-  const servers = await invoke("list_servers");
-  $("servers").replaceChildren(...servers.map(renderServer));
-  $("empty").hidden = servers.length > 0;
+  const server = await invoke("server_info");
+  $("servers").replaceChildren(...(server ? [renderServer(server)] : []));
+  $("empty").hidden = !!server;
+  $("add-form").hidden = !!server;
+  $("switch-hint").hidden = !server;
   await refreshDrive();
   await refreshCacheLimit();
   await refreshPlayers();
@@ -567,7 +566,7 @@ $("open-logs").addEventListener("click", () => run($("open-logs"), () => invoke(
 refresh().catch((e) => showMessage(String(e)));
 showLogPath().catch(() => {});
 setInterval(() => {
-  if (loggingIn.size === 0 && !preServer && !personalServer) refresh().catch(() => {});
+  if (!loggingIn && !preOpen && !personalOpen) refresh().catch(() => {});
 }, REFRESH_MS);
 
 // 숨은 개발자 도구. 화면에 여는 버튼은 없다.

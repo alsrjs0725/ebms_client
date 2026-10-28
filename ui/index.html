@@ -16,6 +16,7 @@
       <h2>서버</h2>
       <p id="empty" class="muted" hidden>아직 추가한 서버가 없습니다. 아래에서 서버 주소를 넣어 주세요.</p>
       <ul id="servers" class="servers"></ul>
+      <p id="switch-hint" class="muted" hidden>다른 서버로 바꾸려면 이 서버를 삭제한 뒤 추가하세요. 로컬 데이터를 남기면 다시 추가할 때 그대로 씁니다.</p>
 
       <form id="add-form" class="add">
         <input id="add-url" type="url" placeholder="서버 주소 (https://…)" required>
@@ -28,10 +29,10 @@
       <h2>가상 드라이브</h2>
       <p id="drive-status" class="muted"></p>
       <form id="drive-form" class="add">
-        <input id="drive-path" type="text" placeholder="마운트 위치 (예: E: 또는 /run/user/1000/ebms)">
+        <input id="drive-path" type="text" placeholder="마운트 위치 (예: E:)">
         <button type="submit">위치 변경</button>
       </form>
-      <p class="muted">서버마다 폴더 하나로 보입니다. 구동기(beatoraja 등)의 곡 폴더에 이 위치를 등록하세요.</p>
+      <p class="muted">서버 이름 폴더 아래에 곡이 보입니다. 구동기(beatoraja 등)의 곡 폴더에 그 폴더를 등록하세요.</p>
       <p class="muted">키음·BGA를 처음 읽으면 곡 전체를 받으며 티켓 1개를 씁니다. 구동기가 아닌 프로그램(백업, 검색, 썸네일 등)의 읽기는 거절하니, 이 폴더는 백업·검색 대상에서 빼 두세요.</p>
     </section>
 
@@ -52,7 +53,7 @@
         <span class="muted">GB</span>
         <button type="submit">용량 변경</button>
       </form>
-      <p class="muted">서버마다 이 용량까지 받은 키음·BGA를 보관합니다. 넘으면 오래 안 쓴 곡부터 지웁니다.</p>
+      <p class="muted">이 용량까지 받은 키음·BGA를 보관합니다. 넘으면 오래 안 쓴 곡부터 지웁니다.</p>
     </section>
 
     <section>

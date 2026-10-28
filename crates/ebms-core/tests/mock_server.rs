@@ -1165,7 +1165,7 @@ fn fake_browser(url: &str) {
 }
 
 #[test]
-fn several_servers_show_as_top_level_folders() {
+fn hub_serves_one_server_under_its_folder() {
     let rt = runtime();
     let (state_a, fixture) = server_state();
     let (state_b, _) = server_state();
@@ -1175,29 +1175,28 @@ fn several_servers_show_as_top_level_folders() {
     let url_b = spawn_server(&rt, state_b.clone());
     let dir = tempfile::tempdir().unwrap();
     let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
+    assert!(hub.server().is_none());
     let banner = fixture
         .files
         .iter()
         .find(|(n, _)| *n == "banner.png")
         .unwrap();
 
-    let (a, b) = rt.block_on(async {
+    let a = rt.block_on(async {
         let a = hub.add(&url_a, Some("Server A")).await.unwrap();
-        let b = hub.add(&url_b, Some("Server B")).await.unwrap();
-        assert!(hub.add(&url_a, None).await.is_err(), "same url twice");
-        assert!(hub.me(&a.entry.id).await.unwrap().is_none());
-        for s in [&a, &b] {
-            let user = hub
-                .login(&s.entry.id, Duration::from_secs(10), fake_browser)
-                .await
-                .unwrap();
-            assert_eq!(user.display_name, "Tester");
-        }
-        hub.sync_all().await;
-        (a, b)
+        // 서버는 하나만 둔다.
+        assert!(hub.add(&url_b, None).await.is_err(), "second server");
+        assert!(hub.me().await.unwrap().is_none());
+        let user = hub
+            .login(Duration::from_secs(10), fake_browser)
+            .await
+            .unwrap();
+        assert_eq!(user.display_name, "Tester");
+        hub.sync().await;
+        a
     });
     assert!(a.sync_status().last_ok_at.is_some());
-    // 키체인 대신 서버별 폴더의 session 파일에 저장됨
+    // 키체인 대신 서버 폴더의 session 파일에 저장됨
     assert!(hub.app_dir().server_dir(&a.entry).join("session").exists());
 
     let drive = hub.drive();
@@ -1207,23 +1206,19 @@ fn several_servers_show_as_top_level_folders() {
         .into_iter()
         .map(|e| e.name)
         .collect();
-    assert_eq!(names, ["Server A", "Server B"]);
-    for server in ["Server A", "Server B"] {
-        let path = format!("{server}/{SONG}/banner.png");
-        assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
-    }
-
-    // 서버 A의 세션이 만료돼도 B는 그대로 동작한다.
-    state_a.server().sessions.clear();
-    rt.block_on(hub.sync_all());
-    assert!(a.sync_status().last_error.is_some());
-    assert!(a.api().needs_login());
-    assert!(b.sync_status().last_error.is_none());
-    let path = format!("Server B/{SONG}/bgm01.wav");
-    assert_eq!(read_all(drive.as_ref(), &path).unwrap(), fixture.files[1].1);
-    // 받아 둔 파일은 로그인 없이도 읽힌다.
+    assert_eq!(names, ["Server A"]);
     let path = format!("Server A/{SONG}/banner.png");
     assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
+
+    let bgm = format!("Server A/{SONG}/bgm01.wav");
+    assert_eq!(read_all(drive.as_ref(), &bgm).unwrap(), fixture.files[1].1);
+
+    // 세션이 만료돼도 받아 둔 파일은 읽힌다.
+    state_a.server().sessions.clear();
+    rt.block_on(a.sync()).unwrap_err();
+    assert!(a.api().needs_login());
+    assert_eq!(read_all(drive.as_ref(), &path).unwrap(), banner.1);
+    assert_eq!(read_all(drive.as_ref(), &bgm).unwrap(), fixture.files[1].1);
 
     // 캐시 사용량을 보여주고 비울 수 있다.
     let usage = a.usage().unwrap();
@@ -1239,32 +1234,37 @@ fn several_servers_show_as_top_level_folders() {
     let cache_dir = hub.app_dir().server_dir(&a.entry).join("cache");
     assert_eq!(std::fs::read_dir(&cache_dir).unwrap().count(), 0);
 
-    // 삭제하면 로그아웃하고 드라이브에서 빠진다. 설정 파일에도 남지 않는다.
-    // 로컬 데이터도 지우기를 고르면 서버 폴더가 사라진다.
-    // (Windows는 열린 파일을 못 지우므로 서버 B를 놓아 준다.)
-    let b_entry = b.entry.clone();
+    // 빼면 드라이브와 설정에서 사라지고, 로컬 데이터는 남는다.
+    let a_entry = a.entry.clone();
+    drop(a);
+    let a_dir = hub.app_dir().server_dir(&a_entry);
+    rt.block_on(hub.remove(false)).unwrap();
+    assert!(a_dir.join("index.sqlite").exists());
+    assert!(hub.server().is_none());
+    assert!(drive.resolve("Server A").is_none());
+    assert!(
+        AppDir::new(dir.path())
+            .load_config()
+            .unwrap()
+            .server
+            .is_none()
+    );
+
+    // 다른 서버로 바꾼다. 로컬 데이터 지우기를 고르면 서버 폴더가 사라진다.
+    // (Windows는 열린 파일을 못 지우므로 서버를 놓아 준다.)
+    let b = rt.block_on(hub.add(&url_b, Some("Server B"))).unwrap();
+    assert!(drive.resolve("Server B").is_some());
+    let b_dir = hub.app_dir().server_dir(&b.entry);
     drop(b);
-    let b_dir = hub.app_dir().server_dir(&b_entry);
-    assert!(b_dir.join("index.sqlite").exists());
-    rt.block_on(hub.remove(&b_entry.id, true)).unwrap();
+    rt.block_on(hub.remove(true)).unwrap();
     assert!(!b_dir.exists());
     assert!(state_b.server().sessions.is_empty());
-    assert!(drive.resolve("Server B").is_none());
-    assert!(drive.resolve("Server A").is_some());
-    let config = AppDir::new(dir.path()).load_config().unwrap();
-    assert_eq!(config.servers.len(), 1);
-    assert_eq!(config.servers[0].name, "Server A");
 
-    // 지우지 않으면 로컬 데이터는 남는다.
-    let a_dir = hub.app_dir().server_dir(&a.entry);
-    rt.block_on(hub.remove(&a.entry.id, false)).unwrap();
-    assert!(a_dir.join("index.sqlite").exists());
+    // 다시 넣고 열면 그 서버가 남은 로컬 데이터와 함께 열린다.
     rt.block_on(hub.add(&url_a, Some("Server A"))).unwrap();
-
-    // 다시 열면 남은 서버만
     drop(hub);
     let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
-    assert_eq!(hub.servers().len(), 1);
+    assert_eq!(hub.server().unwrap().entry.name, "Server A");
     assert!(hub.drive().resolve(&format!("Server A/{SONG}")).is_some());
 }
 

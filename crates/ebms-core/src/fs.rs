@@ -67,8 +67,8 @@ impl Caller for Trusted {
 /// [`ReadOnlyFs::read_async`]의 완료 콜백. 정확히 한 번 불린다.
 pub type ReadDone = Box<dyn FnOnce(Result<Vec<u8>>) + Send>;
 
-/// OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템. 서버 하나([`EbmsFs`])와
-/// 여러 서버를 합친 드라이브([`crate::drive::Drive`])가 구현한다.
+/// OS 가상 FS 백엔드가 호출하는 읽기 전용 파일시스템. 서버의 곡 트리([`EbmsFs`])와
+/// 그것을 서버 이름 폴더 아래에 둔 드라이브([`crate::drive::Drive`])가 구현한다.
 pub trait ReadOnlyFs: Send + Sync {
     fn getattr(&self, ino: Ino) -> Option<Attr>;
     fn lookup(&self, parent: Ino, name: &str) -> Option<Attr>;

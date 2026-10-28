@@ -8,26 +8,23 @@ const $ = (id) => document.getElementById(id);
 
 const LEVELS = { info: "안내", warning: "중요" };
 
-/** 지금 창에 보여준 공지 */
-let shown = [];
+/** 지금 창에 보여준 공지 ({ server_id, server_name, notices }). 없으면 null */
+let shown = null;
 
-function render(groups) {
-  shown = groups;
-  const items = [];
-  for (const g of groups) {
-    for (const n of g.notices) {
-      const li = $("notice-template").content.firstElementChild.cloneNode(true);
-      li.querySelector(".title").textContent = n.title;
-      const badge = li.querySelector(".badge");
-      badge.textContent = LEVELS[n.level] || LEVELS.info;
-      badge.classList.add(n.level === "warning" ? "needs_login" : "logged_out");
-      li.querySelector(".url").textContent = `${g.server_name} · ${new Date(n.updated_at * 1000).toLocaleString()}`;
-      const body = li.querySelector(".body");
-      body.textContent = n.body;
-      body.hidden = !n.body;
-      items.push(li);
-    }
-  }
+function render(group) {
+  shown = group;
+  const items = (group ? group.notices : []).map((n) => {
+    const li = $("notice-template").content.firstElementChild.cloneNode(true);
+    li.querySelector(".title").textContent = n.title;
+    const badge = li.querySelector(".badge");
+    badge.textContent = LEVELS[n.level] || LEVELS.info;
+    badge.classList.add(n.level === "warning" ? "needs_login" : "logged_out");
+    li.querySelector(".url").textContent = `${group.server_name} · ${new Date(n.updated_at * 1000).toLocaleString()}`;
+    const body = li.querySelector(".body");
+    body.textContent = n.body;
+    body.hidden = !n.body;
+    return li;
+  });
   $("notices").replaceChildren(...items);
 }
 
@@ -36,6 +33,7 @@ async function load() {
 }
 
 $("ack").addEventListener("click", async () => {
+  if (!shown) return;
   $("ack").disabled = true;
   try {
     await invoke("ack_notices", { shown });
