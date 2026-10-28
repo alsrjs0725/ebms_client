@@ -233,60 +233,15 @@ impl AppDir {
     }
 
     /// 기본 위치. 실행 파일 옆 `data` 폴더라 C 드라이브가 아닌 곳에 둔 앱은 데이터도 그 드라이브에 둔다.
-    /// 그 폴더를 만들 수 없으면(쓰기 권한이 없는 곳 등) 예전 위치([`Self::legacy_root`])를 쓴다.
+    /// 그 폴더를 만들 수 없으면(쓰기 권한이 없는 곳 등) 사용자 데이터 폴더(`%APPDATA%\ebms`)를 쓴다.
     pub fn default_root() -> Option<PathBuf> {
         let exe = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("data")));
         match exe {
             Some(dir) if std::fs::create_dir_all(&dir).is_ok() => Some(dir),
-            _ => Self::legacy_root(),
+            _ => dirs::data_dir().map(|d| d.join("ebms")),
         }
-    }
-
-    /// 예전 기본 위치 (Windows `%APPDATA%\ebms`, Linux `~/.local/share/ebms`).
-    pub fn legacy_root() -> Option<PathBuf> {
-        dirs::data_dir().map(|d| d.join("ebms"))
-    }
-
-    /// 예전 위치(`old`)에 데이터가 있고 이 폴더에 설정이 아직 없으면 옮긴다. 옮기면 `true`.
-    ///
-    /// 같은 드라이브면 폴더째 옮겨 캐시까지 그대로 쓴다. 드라이브가 다르면 설정·공지 확인 기록·
-    /// 세션 파일만 옮기고 나머지(인덱스·차트·캐시·로그)는 버린다. 인덱스와 차트는 다음 동기화에서,
-    /// 캐시는 쓰면서 다시 받는다. 어느 쪽이든 예전 폴더는 지워 C 드라이브 공간을 비운다.
-    pub fn migrate_from(&self, old: &Path) -> std::io::Result<bool> {
-        if old == self.root || self.config_path().exists() || !old.join("config.toml").exists() {
-            return Ok(false);
-        }
-        // 빈 폴더는 rename 대상이 될 수 없으므로(Windows) 먼저 지운다. 비어 있지 않으면 실패하고 복사로 간다.
-        let _ = std::fs::remove_dir(&self.root);
-        if let Some(parent) = self.root.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if std::fs::rename(old, &self.root).is_ok() {
-            return Ok(true);
-        }
-        std::fs::create_dir_all(&self.root)?;
-        for name in ["notices_seen.json", "config.toml"] {
-            let from = old.join(name);
-            if from.exists() {
-                std::fs::copy(&from, self.root.join(name))?;
-            }
-        }
-        if let Ok(entries) = std::fs::read_dir(old.join("servers")) {
-            for entry in entries.flatten() {
-                let from = entry.path().join(crate::session::SESSION_FILE);
-                if from.exists() {
-                    let dir = self.root.join("servers").join(entry.file_name());
-                    std::fs::create_dir_all(&dir)?;
-                    std::fs::copy(&from, dir.join(crate::session::SESSION_FILE))?;
-                }
-            }
-        }
-        if let Err(e) = std::fs::remove_dir_all(old) {
-            tracing::warn!(?old, %e, "old app data not fully removed");
-        }
-        Ok(true)
     }
 
     pub fn root(&self) -> &Path {
@@ -371,24 +326,6 @@ fn purge_dir(dir: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn migrate_moves_old_data_once() {
-        let tmp = tempfile::tempdir().unwrap();
-        let old = tmp.path().join("old");
-        std::fs::create_dir_all(old.join("servers/a")).unwrap();
-        std::fs::write(old.join("config.toml"), "cache_limit_gb = 3\n").unwrap();
-        std::fs::write(old.join("servers/a/index.sqlite"), b"x").unwrap();
-        let dir = AppDir::new(tmp.path().join("new/data"));
-        std::fs::create_dir_all(dir.root()).unwrap();
-
-        assert!(dir.migrate_from(&old).unwrap());
-        assert!(!old.exists());
-        assert!(dir.config_path().exists());
-        assert!(dir.root().join("servers/a/index.sqlite").exists());
-        // 이미 설정이 있으면 건드리지 않는다
-        assert!(!dir.migrate_from(&old).unwrap());
-    }
 
     #[test]
     fn insecure_url_is_non_loopback_http() {

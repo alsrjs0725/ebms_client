@@ -423,7 +423,7 @@ impl Hub {
             .version()
             .await
             .map_err(|e| Error::Config(format!("{url} is not a reachable EBMS server ({e})")))?;
-        if !crate::API_VERSIONS.contains(&version.api) {
+        if version.api != crate::API_VERSION {
             return Err(Error::ApiVersion(version.api));
         }
         let mut config = self.config();

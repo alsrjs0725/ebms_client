@@ -166,8 +166,6 @@ pub async fn sync_now(state: State<'_, AppState>, id: String) -> CmdResult<SyncS
 
 #[derive(Serialize)]
 pub struct PreTablesView {
-    /// 서버가 난이도표를 지원함. 아니면 전곡만 받을 수 있다.
-    available: bool,
     tables: Vec<DifficultyTable>,
     /// 고른 난이도표 id. None이면 전곡
     selected: Option<Vec<u32>>,
@@ -179,8 +177,7 @@ pub async fn pre_tables(state: State<'_, AppState>, id: String) -> CmdResult<Pre
     let server = state.hub.server(&id).map_err(err)?;
     let tables = server.api().pre_tables().await.map_err(err)?;
     Ok(PreTablesView {
-        available: tables.is_some(),
-        tables: tables.map(|t| t.tables).unwrap_or_default(),
+        tables: tables.tables,
         selected: server.pre_tables().map_err(err)?,
     })
 }
@@ -273,13 +270,13 @@ pub async fn remove_personal_chart(
     Ok(())
 }
 
-/// 지금 동기화하면 받을 용량. 크기를 알려 주지 않는 이전 서버면 None.
+/// 지금 동기화하면 받을 용량.
 /// 사전 청크는 난이도표 태그와 함께 줘서 창에서 고르는 표에 맞춰 바로 다시 센다.
 #[tauri::command]
 pub async fn pending_download(
     state: State<'_, AppState>,
     id: String,
-) -> CmdResult<Option<PendingDownload>> {
+) -> CmdResult<PendingDownload> {
     let server = state.hub.server(&id).map_err(err)?;
     server.client.pending_download().await.map_err(err)
 }

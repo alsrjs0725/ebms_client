@@ -32,7 +32,7 @@ fn sha(data: &[u8]) -> String {
 
 #[derive(Default)]
 struct Server {
-    /// `/api/version`의 api. 3부터 사전 청크가 있다.
+    /// `/api/version`의 api
     api: u32,
     chart_chunks: HashMap<u32, Vec<u8>>,
     pre_chunks: HashMap<u32, Vec<u8>>,
@@ -53,8 +53,8 @@ struct Server {
     play_cuts: usize,
     /// 켜 두면 청크 본문을 해시 목록과 다르게 망가뜨려 보낸다.
     corrupt_chart: bool,
-    /// `/api/pre/tables` 응답. 없으면 404(난이도표가 없는 이전 서버).
-    tables: Option<serde_json::Value>,
+    /// `/api/pre/tables` 응답
+    tables: serde_json::Value,
 }
 
 #[derive(Default)]
@@ -222,15 +222,12 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             get(|State(s): State<AppState>, headers: HeaderMap| async move {
                 s.authorized(&headers)?;
                 let server = s.server();
-                if server.api < 3 {
-                    return Err(StatusCode::NOT_FOUND);
-                }
                 let sizes = |map: &HashMap<u32, Vec<u8>>| -> HashMap<String, serde_json::Value> {
                     map.iter()
                         .map(|(k, v)| (k.to_string(), json!({"sha256": sha(v), "size": v.len()})))
                         .collect()
                 };
-                Ok(axum::Json(json!({
+                Ok::<_, StatusCode>(axum::Json(json!({
                     "chart": sizes(&server.chart_chunks),
                     "asset": sizes(&server.pre_chunks),
                 })))
@@ -240,7 +237,7 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             "/api/pre/tables",
             get(|State(s): State<AppState>, headers: HeaderMap| async move {
                 s.authorized(&headers)?;
-                s.server().tables.clone().map(axum::Json).ok_or(StatusCode::NOT_FOUND)
+                Ok::<_, StatusCode>(axum::Json(s.server().tables.clone()))
             }),
         )
         .route(
@@ -488,8 +485,9 @@ fn server_state() -> (AppState, Fixture) {
     }];
 
     let mut server = Server {
-        api: 1,
+        api: ebms_core::API_VERSION,
         tickets: 5,
+        tables: json!({"tables": [], "chunks": {}}),
         pre_paths: PRE_FILES.iter().map(|s| s.to_string()).collect(),
         ..Default::default()
     };
@@ -744,30 +742,6 @@ fn replaced_chart_chunk_never_serves_shifted_bytes() {
     env.rt.block_on(env.client.sync()).unwrap();
     assert_eq!(dir_files(&charts).len(), 1);
     assert_eq!(read_all(&fresh, &chart).unwrap(), env.fixture.chart_a);
-}
-
-#[test]
-fn legacy_chunk_names_are_migrated_on_open() {
-    let env = setup(true);
-    env.rt.block_on(env.client.sync()).unwrap();
-    let charts = env._dir.path().join("charts");
-    let [name] = &dir_files(&charts)[..] else {
-        panic!("one chart chunk expected");
-    };
-    std::fs::rename(charts.join(name), charts.join("chart_chunk_00000.zip")).unwrap();
-
-    let mut opts = Options::new(&env.url, env._dir.path());
-    opts.session = Some(KEY.to_string());
-    let client = Client::open(&opts).unwrap();
-    assert_eq!(dir_files(&charts), vec![name.clone()]);
-    let fs = client.fs(env.rt.handle().clone()).unwrap();
-    assert_eq!(
-        read_all(&fs, &format!("{SONG}/_7a.bme")).unwrap(),
-        env.fixture.chart_a
-    );
-    // 다시 받지 않는다.
-    assert!(!env.rt.block_on(client.sync()).unwrap().changed());
-    assert_eq!(env.state.counters.chart_chunk.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -1304,7 +1278,7 @@ fn pre_chunk(song_id: u32, files: &[(&str, &[u8])]) -> Vec<u8> {
     make_zip(&refs, zip::CompressionMethod::Stored)
 }
 
-/// 사전 청크가 있는 서버(API 3).
+/// 사전 청크가 있는 서버.
 fn setup_with_pre_chunk() -> Env {
     let env = setup(true);
     let chunk = pre_chunk(
@@ -1315,7 +1289,6 @@ fn setup_with_pre_chunk() -> Env {
         ],
     );
     let mut server = env.state.server();
-    server.api = 3;
     server.pre_chunks.insert(0, chunk);
     drop(server);
     env
@@ -1378,10 +1351,13 @@ fn pre_file_missing_from_chunk_falls_back_to_pre_api() {
 }
 
 #[test]
-fn old_server_has_no_pre_chunks() {
+fn unsupported_api_version_is_rejected() {
     let env = setup(true);
-    let report = env.rt.block_on(env.client.sync()).unwrap();
-    assert!(report.pre_chunks_updated.is_empty());
+    env.state.server().api = ebms_core::API_VERSION - 1;
+    assert!(matches!(
+        env.rt.block_on(env.client.sync()),
+        Err(Error::ApiVersion(v)) if v == ebms_core::API_VERSION - 1
+    ));
     assert_eq!(env.state.counters.pre_hash.load(Ordering::SeqCst), 0);
 }
 
@@ -1393,7 +1369,7 @@ fn selected_difficulty_tables_sync_only_tagged_pre_chunks() {
         server
             .pre_chunks
             .insert(1, pre_chunk(40, &[("banner.png", b"other")]));
-        server.tables = Some(json!({
+        server.tables = json!({
             "tables": [
                 {"id": 1, "name": "Insane", "symbol": "★", "url": "https://t.example/", "charts": 10,
                  "matched_charts": 1, "songs": 1, "fetched_at": 1},
@@ -1401,13 +1377,9 @@ fn selected_difficulty_tables_sync_only_tagged_pre_chunks() {
                  "matched_charts": 1, "songs": 1, "fetched_at": 1},
             ],
             "chunks": {"0": [1], "1": [2]},
-        }));
+        });
     }
-    let tables = env
-        .rt
-        .block_on(env.client.api.pre_tables())
-        .unwrap()
-        .unwrap();
+    let tables = env.rt.block_on(env.client.api.pre_tables()).unwrap();
     assert_eq!(tables.tables.len(), 2);
     assert_eq!(
         tables.chunks_for(&[1, 2]).into_iter().collect::<Vec<_>>(),
@@ -1448,32 +1420,16 @@ fn selected_difficulty_tables_sync_only_tagged_pre_chunks() {
 }
 
 #[test]
-fn server_without_difficulty_tables_syncs_every_pre_chunk() {
-    let env = setup_with_pre_chunk();
-    assert_eq!(env.rt.block_on(env.client.api.pre_tables()).unwrap(), None);
-    env.client.index.set_pre_tables(Some(&[1])).unwrap();
-    let report = env.rt.block_on(env.client.sync()).unwrap();
-    assert_eq!(report.pre_chunks_updated, vec![0]);
-}
-
-#[test]
 fn pending_download_counts_only_missing_chunks_for_selected_tables() {
-    let env = setup(true);
-    // 이전 서버는 크기를 모른다.
-    assert_eq!(
-        env.rt.block_on(env.client.pending_download()).unwrap(),
-        None
-    );
-
     let env = setup_with_pre_chunk();
     let other = pre_chunk(40, &[("banner.png", b"other")]);
     let (chart, pre0, pre1) = {
         let mut server = env.state.server();
         server.pre_chunks.insert(1, other);
-        server.tables = Some(json!({
+        server.tables = json!({
             "tables": [{"id": 1, "name": "Insane", "symbol": "★"}, {"id": 2, "name": "Normal", "symbol": "☆"}],
             "chunks": {"0": [1], "1": [2]},
-        }));
+        });
         let chart: usize = server.chart_chunks.values().map(Vec::len).sum();
         (
             chart as u64,
@@ -1481,12 +1437,7 @@ fn pending_download_counts_only_missing_chunks_for_selected_tables() {
             server.pre_chunks[&1].len() as u64,
         )
     };
-    let p = env
-        .rt
-        .block_on(env.client.pending_download())
-        .unwrap()
-        .unwrap();
-    assert!(p.tables_known);
+    let p = env.rt.block_on(env.client.pending_download()).unwrap();
     assert_eq!(p.chart_bytes, chart);
     assert_eq!(p.pre_for(None), (pre0 + pre1, 2));
     assert_eq!(p.pre_for(Some(&[2])), (pre1, 1));
@@ -1495,11 +1446,7 @@ fn pending_download_counts_only_missing_chunks_for_selected_tables() {
     // 받은 청크는 빼고 센다.
     env.client.index.set_pre_tables(Some(&[1])).unwrap();
     env.rt.block_on(env.client.sync()).unwrap();
-    let p = env
-        .rt
-        .block_on(env.client.pending_download())
-        .unwrap()
-        .unwrap();
+    let p = env.rt.block_on(env.client.pending_download()).unwrap();
     assert_eq!((p.chart_bytes, p.chart_chunks), (0, 0));
     assert_eq!(p.pre_for(Some(&[1])), (0, 0));
     assert_eq!(p.pre_for(None), (pre1, 1));

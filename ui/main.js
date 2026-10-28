@@ -21,7 +21,7 @@ let preServer = null;
 /** 개인 채보 창을 연 서버 */
 let personalServer = null;
 const SEARCH_DELAY_MS = 200;
-/** 사전 다운로드 범위 창에서 쓰는 받을 용량(`pending_download`). 계산 중이면 "loading", 모르면 null */
+/** 사전 다운로드 범위 창에서 쓰는 받을 용량(`pending_download`). 계산 중이면 "loading", 세지 못했으면 null */
 let prePending = null;
 /** 서버 카드에 보여 줄 받을 용량. 서버 id → { key, at, value } */
 const pendingCache = new Map();
@@ -241,7 +241,7 @@ function renderServer(s) {
 
 /** 고른 난이도표(null이면 전곡)로 동기화하면 받을 { chart, pre, total } 바이트. 서버의 sync_pre와 같은 기준. */
 function pendingBytes(p, selected) {
-  const pick = selected && p.tables_known ? new Set(selected) : null;
+  const pick = selected ? new Set(selected) : null;
   const pre = p.pre
     .filter((c) => !pick || c.tables.some((t) => pick.has(t)))
     .reduce((sum, c) => sum + c.size, 0);
@@ -297,9 +297,7 @@ async function openPreDialog(s) {
   });
   $("pre-list").replaceChildren(...items);
   const empty = $("pre-empty");
-  empty.textContent = view.available
-    ? "서버에 등록된 난이도표가 없습니다."
-    : "이 서버는 난이도표를 지원하지 않아 전곡을 받습니다.";
+  empty.textContent = "서버에 등록된 난이도표가 없습니다.";
   empty.hidden = view.tables.length > 0;
   form.querySelector('[value="tables"]').disabled = view.tables.length === 0;
   updatePreForm();
@@ -317,7 +315,7 @@ function updatePreForm() {
   });
   const checked = boxes.filter((b) => b.checked).map((b) => Number(b.value));
   $("pre-save").disabled = byTable && !checked.length;
-  // 계산 중이면 그대로 두고, 이전 서버라 크기를 모르면 숨긴다.
+  // 계산 중이면 그대로 두고, 세지 못했으면 숨긴다.
   const pending = $("pre-pending");
   if (prePending === "loading") return;
   pending.hidden = !prePending;

@@ -42,15 +42,13 @@ impl SyncReport {
 
 pub async fn sync_all(api: &Api, paths: &Paths, index: &Index) -> Result<SyncReport> {
     let version = api.version().await?;
-    if !crate::API_VERSIONS.contains(&version.api) {
+    if version.api != crate::API_VERSION {
         return Err(Error::ApiVersion(version.api));
     }
     let mut report = SyncReport::default();
     sync_charts(api, paths, index, &mut report).await?;
     sync_manifests(api, index, &mut report).await?;
-    if version.api >= crate::PRE_CHUNK_API {
-        sync_pre(api, paths, index, &mut report).await?;
-    }
+    sync_pre(api, paths, index, &mut report).await?;
     if report.changed() {
         info!(?report, "sync finished");
     }
@@ -111,13 +109,8 @@ async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncRepo
     // 난이도표를 골랐으면 그 표의 태그가 붙은 청크만 받고, 나머지는 로컬에서도 뺀다.
     // 빠진 곡의 사전 파일은 읽을 때 하나씩 받는다.
     if let Some(selected) = index.pre_tables()? {
-        match api.pre_tables().await? {
-            Some(tables) => {
-                let wanted = tables.chunks_for(&selected);
-                remote.retain(|id, _| wanted.contains(id));
-            }
-            None => warn!("server has no difficulty tables, syncing every pre chunk"),
-        }
+        let wanted = api.pre_tables().await?.chunks_for(&selected);
+        remote.retain(|id, _| wanted.contains(id));
     }
 
     // 클로저가 빌린 참조를 받으면 future가 `Send`로 증명되지 않아(앱의 `spawn`) 소유한 값으로 넘긴다.
@@ -163,8 +156,6 @@ pub struct PendingDownload {
     pub chart_chunks: u32,
     /// 아직 없거나 바뀐 사전 청크(난이도표와 무관하게 전부)
     pub pre: Vec<PendingPreChunk>,
-    /// 서버가 난이도표 태그를 줬음. 아니면 표를 골라도 전부 받는다([`sync_pre`]와 같다).
-    pub tables_known: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -179,24 +170,14 @@ impl PendingDownload {
     pub fn pre_for(&self, selected: Option<&[u32]>) -> (u64, u32) {
         self.pre
             .iter()
-            .filter(|c| match selected {
-                Some(sel) if self.tables_known => c.tables.iter().any(|t| sel.contains(t)),
-                _ => true,
-            })
+            .filter(|c| selected.is_none_or(|sel| c.tables.iter().any(|t| sel.contains(t))))
             .fold((0, 0), |(bytes, n), c| (bytes + c.size, n + 1))
     }
 }
 
 /// 지금 동기화하면 받을 청크 용량을 센다. 로컬에 같은 해시의 파일이 있는 청크는 뺀다.
-/// 크기 API가 없는 이전 서버면 None.
-pub async fn pending_download(
-    api: &Api,
-    paths: &Paths,
-    index: &Index,
-) -> Result<Option<PendingDownload>> {
-    let Some(sizes) = api.chunk_sizes().await? else {
-        return Ok(None);
-    };
+pub async fn pending_download(api: &Api, paths: &Paths, index: &Index) -> Result<PendingDownload> {
+    let sizes = api.chunk_sizes().await?;
     let mut out = PendingDownload::default();
     let local = index.chunk_hashes(ChunkKind::Chart)?;
     for (id, c) in &sizes.chart {
@@ -206,29 +187,23 @@ pub async fn pending_download(
         }
     }
     if sizes.asset.is_empty() {
-        return Ok(Some(out));
+        return Ok(out);
     }
-    let tags = api.pre_tables().await?.map(|t| t.chunks);
-    out.tables_known = tags.is_some();
+    let tags = api.pre_tables().await?.chunks;
     let local = index.chunk_hashes(ChunkKind::Pre)?;
     for (id, c) in &sizes.asset {
         if local.get(id) == Some(&c.sha256) && paths.pre_chunk(*id, &c.sha256).exists() {
             continue;
         }
-        let tables = tags
-            .as_ref()
-            .and_then(|t| t.get(id).cloned())
-            .unwrap_or_default();
         out.pre.push(PendingPreChunk {
             size: c.size,
-            tables,
+            tables: tags.get(id).cloned().unwrap_or_default(),
         });
     }
-    Ok(Some(out))
+    Ok(out)
 }
 
-/// 청크 폴더를 인덱스에 맞춘다. 해시 없는 이전 이름은 인덱스 판 이름으로 옮기고,
-/// 인덱스가 가리키지 않는 파일(교체·삭제된 옛 판)은 지운다.
+/// 청크 폴더에서 인덱스가 가리키지 않는 파일(교체·삭제된 옛 판)을 지운다.
 /// 옛 판을 읽는 트리가 없을 때(시작할 때, 다음 동기화 전) 부른다.
 pub fn tidy_chunks(paths: &Paths, index: &Index) -> Result<()> {
     let kinds = [
@@ -236,25 +211,15 @@ pub fn tidy_chunks(paths: &Paths, index: &Index) -> Result<()> {
             ChunkKind::Chart,
             paths.charts(),
             Paths::chart_chunk as fn(&Paths, u32, &str) -> std::path::PathBuf,
-            Paths::legacy_chart_chunk as fn(&Paths, u32) -> std::path::PathBuf,
         ),
-        (
-            ChunkKind::Pre,
-            paths.pre(),
-            Paths::pre_chunk,
-            Paths::legacy_pre_chunk,
-        ),
+        (ChunkKind::Pre, paths.pre(), Paths::pre_chunk),
     ];
-    for (kind, dir, current, legacy) in kinds {
-        let mut keep = HashSet::new();
-        for (id, sha) in index.chunk_hashes(kind)? {
-            let dest = current(paths, id, &sha);
-            let old = legacy(paths, id);
-            if !dest.exists() && old.exists() {
-                std::fs::rename(&old, &dest)?;
-            }
-            keep.insert(dest);
-        }
+    for (kind, dir, current) in kinds {
+        let keep: HashSet<_> = index
+            .chunk_hashes(kind)?
+            .iter()
+            .map(|(&id, sha)| current(paths, id, sha))
+            .collect();
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };

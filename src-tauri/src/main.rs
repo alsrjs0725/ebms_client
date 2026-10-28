@@ -34,24 +34,10 @@ pub struct AppState {
 }
 
 fn main() {
-    let (root, migrated) = match std::env::var_os("EBMS_DATA") {
-        Some(d) => (Some(PathBuf::from(d)), Ok(false)),
-        None => {
-            let root = AppDir::default_root();
-            let migrated = match (&root, AppDir::legacy_root()) {
-                (Some(root), Some(old)) => AppDir::new(root).migrate_from(&old),
-                _ => Ok(false),
-            };
-            (root, migrated)
-        }
-    };
-    // 옮긴 뒤에 로그를 연다. 로그 폴더가 먼저 생기면 폴더째 옮기지 못한다.
+    let root = std::env::var_os("EBMS_DATA")
+        .map(PathBuf::from)
+        .or_else(AppDir::default_root);
     let log_dir = logging::init(root.as_deref());
-    match migrated {
-        Ok(true) => tracing::info!(?root, "moved app data from the old location"),
-        Ok(false) => {}
-        Err(e) => tracing::warn!(%e, "could not move app data from the old location"),
-    }
 
     if let Err(e) = run(root, log_dir) {
         tracing::error!("{e}");
