@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tokio::runtime::Handle;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::api::{Api, Me, User};
 use crate::auth::LoginRequest;
@@ -254,6 +254,7 @@ impl Server {
                 Some(now)
             }
             Err(e) => {
+                warn!(server = %self.entry.name, %e, "sync failed");
                 status.last_error = Some(e.to_string());
                 None
             }
@@ -425,6 +426,7 @@ impl Hub {
         };
         self.update_config(|c| c.server = Some(entry))?;
         self.insert(server.clone());
+        info!(server = %server.entry.name, %url, "server added");
         Ok(server)
     }
 
@@ -448,6 +450,7 @@ impl Hub {
                 .await
                 .map_err(|e| Error::Other(e.to_string()))??;
         }
+        info!(server = %entry.name, purge, "server removed");
         Ok(entry)
     }
 
@@ -465,16 +468,18 @@ impl Hub {
             .await
             .map_err(|e| Error::Other(e.to_string()))??;
         server.api().set_session(Some(token.session_key));
+        info!(server = %server.entry.name, "logged in");
         Ok(token.user)
     }
 
     /// 서버에서 세션을 폐기하고 저장된 세션키를 지운다. 서버에 닿지 않아도 로컬 세션키는 지운다.
     pub async fn logout(&self) -> Result<()> {
         let server = self.require()?;
-        if server.api().has_session()
-            && let Err(e) = server.api().logout().await
-        {
-            warn!(server = %server.entry.name, %e, "server logout failed");
+        if server.api().has_session() {
+            if let Err(e) = server.api().logout().await {
+                warn!(server = %server.entry.name, %e, "server logout failed");
+            }
+            info!(server = %server.entry.name, "logged out");
         }
         server.api().set_session(None);
         let store = self.session(&server.entry);
@@ -492,14 +497,12 @@ impl Hub {
         server.api().me().await.map(Some)
     }
 
-    /// 로그인돼 있으면 동기화한다. 실패는 서버 상태에만 남긴다.
+    /// 로그인돼 있으면 동기화한다. 실패는 서버 상태와 로그에 남는다([`Server::sync`]).
     pub async fn sync(&self) {
         let Some(server) = self.server().filter(|s| !s.api().needs_login()) else {
             return;
         };
-        if let Err(e) = server.sync().await {
-            warn!(server = %server.entry.name, %e, "sync failed");
-        }
+        let _ = server.sync().await;
     }
 }
 

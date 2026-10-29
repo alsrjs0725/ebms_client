@@ -38,6 +38,7 @@ fn main() {
         .map(PathBuf::from)
         .or_else(AppDir::default_root);
     let log_dir = logging::init(root.as_deref());
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
 
     if let Err(e) = run(root, log_dir) {
         tracing::error!("{e}");

@@ -38,6 +38,9 @@ pub struct Fetcher {
     locks: Mutex<HashMap<Key, Arc<tokio::sync::Mutex<()>>>>,
     /// 티켓이 없어 플레이 다운로드를 멈춘 경우 다시 시도할 시각(unix 초). 서버(계정) 단위.
     retry_at: Mutex<Option<u64>>,
+    /// 마지막으로 로그에 남긴 비구동기 읽기 거절 (곡, 프로그램). 인덱서·썸네일러가 한 곡의 파일을
+    /// 잇달아 읽을 때 읽기마다 남기지 않는다.
+    last_refused: Mutex<Option<(u32, String)>>,
 }
 
 impl Fetcher {
@@ -53,6 +56,7 @@ impl Fetcher {
             paths,
             locks: Mutex::new(HashMap::new()),
             retry_at: Mutex::new(retry_at),
+            last_refused: Mutex::new(None),
         }
     }
 
@@ -75,12 +79,17 @@ impl Fetcher {
         if entry.kind == FileKind::Play {
             if !caller.is_player() {
                 let program = caller.name();
-                info!(
-                    song_id = song.song_id,
-                    program,
-                    path = entry.path,
-                    "play file read by a non-player, refused"
-                );
+                let refused = Some((song.song_id, program.clone()));
+                let mut last = self.last_refused.lock().unwrap_or_else(|e| e.into_inner());
+                if *last != refused {
+                    info!(
+                        song_id = song.song_id,
+                        program,
+                        path = entry.path,
+                        "play file read by a non-player, refused (not logged again for this song)"
+                    );
+                    *last = refused;
+                }
                 return Err(Error::NotPlayer { program });
             }
             self.ensure_song(song, &caller.name(), &entry.path).await?;

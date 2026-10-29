@@ -280,6 +280,8 @@ impl AsyncFileSystemContext for WinFs {
                 }
                 // 이미 로그를 남겼다. 다른 프로그램에는 권한 없음으로 보인다.
                 Err(Error::NotPlayer { .. }) => Err(STATUS_ACCESS_DENIED.into()),
+                // 티켓 대기는 멈출 때 한 번 남겼다. 대기 중 읽기마다 남기지 않는다.
+                Err(Error::NoTicket { .. }) => Err(STATUS_UNEXPECTED_IO_ERROR.into()),
                 // Qwilight 미리듣기 로드. Qwilight는 못 읽은 키음·BGA를 건너뛴다.
                 Err(Error::PreviewOnly) => Err(STATUS_ACCESS_DENIED.into()),
                 Err(e) => {
