@@ -1,4 +1,4 @@
-//! 설정 창이 부르는 명령. 오류는 문자열로 돌려 창에만 보여준다.
+//! 설정 창이 부르는 명령. 오류는 문자열로 돌려 창에 보여준다. 로그인·서버 추가 실패는 로그에도 남긴다.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,7 +117,10 @@ pub async fn add_server(
     url: String,
     name: Option<String>,
 ) -> CmdResult<ServerView> {
-    let server = state.hub.add(&url, name.as_deref()).await.map_err(err)?;
+    let server = state.hub.add(&url, name.as_deref()).await.map_err(|e| {
+        tracing::warn!(url, %e, "could not add server");
+        err(e)
+    })?;
     Ok(view(server).await)
 }
 
@@ -144,7 +147,10 @@ pub async fn login(state: State<'_, AppState>) -> CmdResult<()> {
         }
     })
     .await
-    .map_err(err)?;
+    .map_err(|e| {
+        tracing::warn!(%e, "login failed");
+        err(e)
+    })?;
     tauri::async_runtime::spawn(async move { hub.sync().await });
     Ok(())
 }
