@@ -30,13 +30,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo build --release -p ebms-app --features tauri/custom-protocol
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      # 포함된 crate의 저작권·라이선스 고지(about.toml, about.hbs)
+      - run: cargo about generate --workspace about.hbs -o THIRD_PARTY_LICENSES.html
       - name: 패키징
         shell: bash
         run: |
           name="ebms-${{ matrix.platform }}"
           mkdir -p "dist/$name"
-          # 실행에 필요한 앱만 담는다
-          cp "target/release/ebms-app${{ matrix.exe }}" LICENSE "dist/$name/"
+          # 실행에 필요한 앱과 라이선스 고지만 담는다
+          cp "target/release/ebms-app${{ matrix.exe }}" LICENSE THIRD_PARTY_LICENSES.html "dist/$name/"
           cd dist
           7z a "$name.zip" "$name" >/dev/null
       - uses: actions/upload-artifact@v4

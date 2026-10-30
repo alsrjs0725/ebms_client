@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>EBMS 서드파티 라이선스</title>
+<style>
+body{font:14px/1.5 system-ui,"Segoe UI","Malgun Gothic",sans-serif;max-width:960px;margin:0 auto;padding:16px}
+pre{white-space:pre-wrap;background:#f5f5f5;padding:12px;border-radius:6px}
+li{margin:2px 0}
+</style>
+</head>
+<body>
+<h1>EBMS 서드파티 라이선스</h1>
+<p>ebms-app.exe에 포함된 오픈소스 구성요소와 라이선스 전문입니다.
+EBMS 자체 코드는 MIT 라이선스(LICENSE)이며, GPL-3.0 구성요소(winfsp, winfsp-sys)를 포함하므로
+배포된 실행 파일 전체는 GPL-3.0 조건을 따릅니다. 소스: https://github.com/alsrjs0725/ebms_client</p>
+<h2>라이선스별 요약</h2>
+<ul>
+{{#each overview}}<li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+{{/each}}</ul>
+<h2>라이선스 전문</h2>
+{{#each licenses}}
+<h3 id="{{id}}">{{name}}</h3>
+<p>사용처:</p>
+<ul>
+{{#each used_by}}<li>{{crate.name}} {{crate.version}}{{#if crate.repository}} — {{crate.repository}}{{/if}}</li>
+{{/each}}</ul>
+<pre>{{text}}</pre>
+{{/each}}
+</body>
+</html>

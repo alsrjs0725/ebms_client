@@ -47,3 +47,14 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+## 라이선스
+
+EBMS 클라이언트 코드는 [MIT 라이선스](LICENSE)입니다. 다만 Windows 백엔드가 쓰는 `winfsp`·`winfsp-sys` 크레이트가 GPL-3.0이라, 이를 정적 링크한 배포용 실행 파일(`ebms-app.exe`)은 전체가 GPL-3.0 조건을 따릅니다. 해당 소스는 이 저장소의 릴리스 태그에 있습니다.
+
+릴리스 zip에는 포함된 크레이트의 저작권·라이선스 전문을 모은 `THIRD_PARTY_LICENSES.html`이 함께 들어 있습니다. [cargo-about](https://github.com/EmbarkStudios/cargo-about)으로 만들며(`about.toml`, `about.hbs`), 허용 목록에 없는 라이선스의 크레이트가 들어오면 CI가 실패하므로 확인 후 `about.toml`에 추가합니다.
+
+```bash
+cargo install cargo-about --features cli
+cargo about generate --workspace about.hbs -o THIRD_PARTY_LICENSES.html
+```
