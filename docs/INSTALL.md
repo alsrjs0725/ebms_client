@@ -13,7 +13,7 @@ EBMS는 BMS를 시작할 때 걸림돌이던 곡 찾기, 다운로드, 관리, �
 
 ## 지원 구동기
 
-beatoraja, LR2(lr2oraja, LR2body), Qwilight를 기본으로 인식합니다. 목록에 없는 구동기는 설정 창의 "구동기 exe 선택"으로 직접 추가할 수 있습니다.
+beatoraja, LR2(lr2oraja, LR2body), Qwilight를 기본으로 인식합니다. 충분히 테스트한 구동기는 beatoraja이며, LR2와 Qwilight는 작동에 이상이 있을 수 있습니다. 목록에 없는 구동기는 설정 창의 "구동기 exe 선택"으로 직접 추가할 수 있습니다.
 
 클라이언트는 Windows 전용입니다.
 
