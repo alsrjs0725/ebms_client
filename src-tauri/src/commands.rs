@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use ebms_core::Error;
 use ebms_core::api::{DifficultyTable, Me};
-use ebms_core::hub::{LinkedChart, LocalUsage, Server, SongHit, SyncStatus};
+use ebms_core::hub::{LinkedChart, LocalUsage, Server, SongHit, SyncStatus, TableDownload};
 use ebms_core::personal::{PERSONAL_EXTS, PersonalChart};
 use ebms_core::sync::PendingDownload;
+use ebms_core::table::UserTable;
 use serde::Serialize;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
@@ -202,6 +203,60 @@ pub async fn set_pre_tables(
     server.set_pre_tables(selected.as_deref()).map_err(err)?;
     server.sync().await.map_err(err)?;
     Ok(server.sync_status())
+}
+
+#[derive(Serialize)]
+pub struct UserTablesView {
+    tables: Vec<UserTable>,
+    download: TableDownload,
+    /// 캐시 한도(바이트). 고른 표의 곡이 이보다 크면 경고한다.
+    cache_limit: u64,
+}
+
+/// 곡을 받을 난이도표(사용자가 주소로 고른 것)와 받기 진행 상태.
+#[tauri::command]
+pub async fn user_tables(state: State<'_, AppState>) -> CmdResult<UserTablesView> {
+    let server = server(&state)?;
+    Ok(UserTablesView {
+        tables: server.user_tables().map_err(err)?,
+        download: server.table_download(),
+        cache_limit: server.client.fetcher.cache().limit(),
+    })
+}
+
+/// 표 주소를 이 PC가 읽고 해시만 서버에 보내 곡을 맞춘다. 서버는 표 주소에 접속하지 않는다.
+#[tauri::command]
+pub async fn add_user_table(state: State<'_, AppState>, url: String) -> CmdResult<UserTable> {
+    let server = server(&state)?;
+    server.add_user_table(&url).await.map_err(|e| {
+        tracing::warn!(%e, url, "could not add difficulty table");
+        err(e)
+    })
+}
+
+#[tauri::command]
+pub async fn remove_user_table(state: State<'_, AppState>, url: String) -> CmdResult<()> {
+    server(&state)?.remove_user_table(&url).map_err(err)
+}
+
+/// 고른 표를 모두 다시 읽는다. 읽지 못한 표의 오류 목록.
+#[tauri::command]
+pub async fn refresh_user_tables(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
+    server(&state)?.refresh_user_tables().await.map_err(err)
+}
+
+/// 고른 표의 곡 받기를 뒤에서 시작한다. 진행은 `user_tables`로 본다.
+#[tauri::command]
+pub async fn start_table_download(state: State<'_, AppState>) -> CmdResult<()> {
+    let server = server(&state)?;
+    tauri::async_runtime::spawn(async move { server.download_tables().await });
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_table_download(state: State<'_, AppState>) -> CmdResult<()> {
+    server(&state)?.stop_table_download();
+    Ok(())
 }
 
 /// 연결한 개인 채보 목록.
