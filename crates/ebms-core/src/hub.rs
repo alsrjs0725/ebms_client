@@ -21,6 +21,7 @@ use crate::personal::PersonalChart;
 use crate::players::Players;
 use crate::session::SessionStore;
 use crate::sync::SyncReport;
+use crate::table::UserTable;
 use crate::{Client, Error, Options, Result};
 
 /// 서버 하나.
@@ -33,7 +34,29 @@ pub struct Server {
     sync_lock: tokio::sync::Mutex<()>,
     /// 설정에서 빠짐. 이미 시작한 동기화 묶음이 지운 폴더에 다시 쓰지 않게 한다.
     removed: AtomicBool,
+    /// 고른 난이도표의 곡 받기 상태
+    table_status: Mutex<TableDownload>,
+    /// 곡 받기를 멈춰 달라는 요청
+    table_stop: AtomicBool,
 }
+
+/// 고른 난이도표의 곡 받기 진행 상태. 설정 창에 보여준다.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct TableDownload {
+    pub running: bool,
+    /// 이번에 받을 곡 수 (이미 받은 곡 제외)
+    pub total: u32,
+    pub done: u32,
+    pub failed: u32,
+    /// 아직 동기화하지 않아 목록에 없는 곡 (다음 동기화 뒤 다시 받기)
+    pub not_synced: u32,
+    /// 티켓을 기다리는 중이면 다시 시도할 시각 (unix 초)
+    pub waiting_until: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+/// 곡 받기가 남겨 두는 티켓 수. 구동기가 새 곡을 바로 열 수 있게 한다.
+const TABLE_TICKET_RESERVE: u32 = 1;
 
 /// 이 서버가 쓰는 로컬 저장 공간. 설정 창에 보여준다.
 #[derive(Clone, Debug, Default, Serialize)]
@@ -137,6 +160,220 @@ impl Server {
     /// 사전 다운로드할 난이도표를 정한다. 다음 동기화부터 고른 표의 곡이 든 사전 청크만 받는다.
     pub fn set_pre_tables(&self, tables: Option<&[u32]>) -> Result<()> {
         self.client.index.set_pre_tables(tables)
+    }
+
+    // ---- 고른 난이도표의 곡 받기 ----
+
+    /// 고른 난이도표. 인덱스를 읽으므로 런타임 밖에서 불러도 된다(작음).
+    pub fn user_tables(&self) -> Result<Vec<UserTable>> {
+        self.client.index.user_tables()
+    }
+
+    /// 표 주소를 이 PC가 읽고 해시만 서버에 보내 곡을 맞춘다. 같은 주소가 있으면 바꾼다.
+    pub async fn add_user_table(&self, url: &str) -> Result<UserTable> {
+        let table = self.check_user_table(url.trim()).await?;
+        let mut tables = self.user_tables()?;
+        match tables.iter_mut().find(|t| t.url == table.url) {
+            Some(t) => *t = table.clone(),
+            None => tables.push(table.clone()),
+        }
+        self.client.index.set_user_tables(&tables)?;
+        self.apply_table_pins()?;
+        Ok(table)
+    }
+
+    /// 고른 표를 모두 다시 읽어 곡을 맞춘다. 읽지 못한 표는 이전 결과를 둔다. 실패한 표의 오류 목록.
+    pub async fn refresh_user_tables(&self) -> Result<Vec<String>> {
+        let mut tables = self.user_tables()?;
+        let mut errors = Vec::new();
+        for t in &mut tables {
+            match self.check_user_table(&t.url).await {
+                Ok(new) => *t = new,
+                Err(e) => {
+                    warn!(url = %t.url, %e, "difficulty table refresh failed");
+                    errors.push(format!("{}: {e}", t.name));
+                }
+            }
+        }
+        // 읽는 동안 지운 표는 되살리지 않는다.
+        let current: std::collections::HashSet<String> =
+            self.user_tables()?.into_iter().map(|t| t.url).collect();
+        tables.retain(|t| current.contains(&t.url));
+        self.client.index.set_user_tables(&tables)?;
+        self.apply_table_pins()?;
+        Ok(errors)
+    }
+
+    /// 표를 빼고, 다른 표에 없는 곡의 "항상 보관"을 푼다(캐시 한도에 따라 지워질 수 있게).
+    pub fn remove_user_table(&self, url: &str) -> Result<()> {
+        let mut tables = self.user_tables()?;
+        tables.retain(|t| t.url != url);
+        self.client.index.set_user_tables(&tables)?;
+        self.apply_table_pins()
+    }
+
+    async fn check_user_table(&self, url: &str) -> Result<UserTable> {
+        let http = crate::table::http_client()?;
+        let hashes = crate::table::fetch(&http, url).await?;
+        let matched = self.api().match_table(&hashes.md5, &hashes.sha256).await?;
+        info!(
+            url,
+            name = hashes.name,
+            charts = hashes.charts,
+            songs = matched.songs.len(),
+            "difficulty table matched"
+        );
+        Ok(UserTable {
+            url: url.to_string(),
+            name: hashes.name,
+            symbol: hashes.symbol,
+            charts: hashes.charts as u32,
+            matched_charts: (matched.matched_md5.len() + matched.matched_sha256.len())
+                .min(hashes.charts) as u32,
+            bytes: matched.songs.iter().map(|s| s.size).sum(),
+            songs: matched.songs.into_iter().map(|s| s.id).collect(),
+            checked_at: unix_now(),
+        })
+    }
+
+    /// 고른 표들의 곡 (겹치는 곡은 한 번).
+    fn table_songs(&self) -> Result<std::collections::BTreeSet<u32>> {
+        Ok(self
+            .user_tables()?
+            .into_iter()
+            .flat_map(|t| t.songs)
+            .collect())
+    }
+
+    /// 고른 표의 곡만 캐시에서 "항상 보관"으로 둔다.
+    fn apply_table_pins(&self) -> Result<()> {
+        self.client.index.cache_pin_only(&self.table_songs()?)
+    }
+
+    pub fn table_download(&self) -> TableDownload {
+        self.table_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 곡 받기를 멈춘다. 지금 받는 곡은 끝까지 받는다.
+    pub fn stop_table_download(&self) {
+        self.table_stop.store(true, Ordering::SeqCst);
+    }
+
+    fn set_table_status(&self, f: impl FnOnce(&mut TableDownload)) {
+        f(&mut self.table_status.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+
+    /// 고른 표의 곡 중 캐시에 없는 곡을 하나씩 받는다(곡마다 티켓 1개). 티켓이 모자라면 찰 때까지 기다리고,
+    /// 구동기가 바로 쓸 수 있게 [`TABLE_TICKET_RESERVE`]개는 남긴다. 받은 곡은 "항상 보관"으로 둔다.
+    /// 이미 돌고 있으면 아무것도 하지 않는다.
+    pub async fn download_tables(&self) -> Result<()> {
+        {
+            let mut st = self.table_status.lock().unwrap_or_else(|e| e.into_inner());
+            if st.running {
+                return Ok(());
+            }
+            *st = TableDownload {
+                running: true,
+                ..Default::default()
+            };
+        }
+        self.table_stop.store(false, Ordering::SeqCst);
+        let result = self.download_tables_inner().await;
+        self.set_table_status(|st| {
+            st.running = false;
+            st.waiting_until = None;
+            if let Err(e) = &result {
+                st.last_error = Some(e.to_string());
+            }
+        });
+        if let Err(e) = &result {
+            warn!(server = %self.entry.name, %e, "table download stopped");
+        }
+        result
+    }
+
+    async fn download_tables_inner(&self) -> Result<()> {
+        self.apply_table_pins()?;
+        let tree = self.fs.tree();
+        let cache = self.client.fetcher.cache().clone();
+        let mut todo = Vec::new();
+        let mut not_synced = 0;
+        for id in self.table_songs()? {
+            match tree.song(id) {
+                Some(song)
+                    if !song
+                        .files
+                        .iter()
+                        .all(|f| cache.contains(id, &f.path, f.size)) =>
+                {
+                    todo.push(song)
+                }
+                Some(_) => {}
+                None => not_synced += 1,
+            }
+        }
+        self.set_table_status(|st| {
+            st.total = todo.len() as u32;
+            st.not_synced = not_synced;
+        });
+        info!(songs = todo.len(), not_synced, "table download started");
+        for song in todo {
+            loop {
+                if self.table_stop.load(Ordering::SeqCst) || self.removed.load(Ordering::SeqCst) {
+                    info!("table download stopped by user");
+                    return Ok(());
+                }
+                // 남길 티켓만 있으면 다음 티켓이 찰 때까지 기다린다.
+                let me = self.api().me().await?;
+                let wait = if me.tickets.available <= TABLE_TICKET_RESERVE {
+                    Some(
+                        me.tickets
+                            .next_refill_in
+                            .map_or(me.tickets.refill_seconds, |s| s.max(1) as u64),
+                    )
+                } else {
+                    match self
+                        .client
+                        .fetcher
+                        .ensure_song(&song, "ebms (table download)", "")
+                        .await
+                    {
+                        Ok(()) => {
+                            cache.pin_song(song.song_id, true)?;
+                            self.set_table_status(|st| st.done += 1);
+                            break;
+                        }
+                        Err(Error::NoTicket { retry_after }) => Some(retry_after),
+                        Err(e @ Error::Unauthorized) => return Err(e),
+                        Err(e) => {
+                            warn!(song_id = song.song_id, %e, "table download: song failed");
+                            self.set_table_status(|st| {
+                                st.failed += 1;
+                                st.last_error = Some(format!("곡 {}: {e}", song.song_id));
+                            });
+                            break;
+                        }
+                    }
+                };
+                if let Some(secs) = wait {
+                    self.wait_ticket(secs).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `secs`초(1초 이상) 기다린다. 멈추라는 요청이 오면 바로 돌아온다.
+    async fn wait_ticket(&self, secs: u64) {
+        let until = unix_now() + secs.max(1) as i64;
+        self.set_table_status(|st| st.waiting_until = Some(until));
+        while unix_now() < until && !self.table_stop.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        self.set_table_status(|st| st.waiting_until = None);
     }
 
     /// 곡 폴더 이름(`00123 Artist - Title`)에 `query`가 든 곡. 대소문자를 무시하고, 빈칸으로 나눈 낱말이 모두
@@ -532,6 +769,8 @@ fn open_server(
         }),
         sync_lock: tokio::sync::Mutex::new(()),
         removed: AtomicBool::new(false),
+        table_status: Mutex::new(TableDownload::default()),
+        table_stop: AtomicBool::new(false),
     }))
 }
 
@@ -540,6 +779,15 @@ pub(crate) fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// 설정 창 명령은 다른 스레드에서 돌리므로 future가 `Send`여야 한다.
+#[allow(dead_code)]
+fn _table_futures_are_send(server: std::sync::Arc<Server>) {
+    fn send<T: Send>(_: T) {}
+    send(server.download_tables());
+    send(server.add_user_table(""));
+    send(server.refresh_user_tables());
 }
 
 #[cfg(test)]

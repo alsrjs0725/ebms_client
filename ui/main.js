@@ -20,6 +20,8 @@ let loggingIn = false;
 let preOpen = false;
 /** 개인 채보 창이 열려 있음 */
 let personalOpen = false;
+/** 난이도표 곡 받기 창이 열려 있으면 진행 상태를 다시 읽는 타이머 */
+let tableTimer = null;
 const SEARCH_DELAY_MS = 200;
 /** 사전 다운로드 범위 창에서 쓰는 받을 용량(`pending_download`). 계산 중이면 "loading", 세지 못했으면 null */
 let prePending = null;
@@ -179,6 +181,9 @@ function renderServer(s) {
   const preBtn = li.querySelector(".pre-tables");
   preBtn.hidden = s.login !== "logged_in";
   preBtn.addEventListener("click", () => run(preBtn, () => openPreDialog(s)));
+  const tableBtn = li.querySelector(".table-dl");
+  tableBtn.hidden = s.login !== "logged_in";
+  tableBtn.addEventListener("click", () => run(tableBtn, () => openTableDialog(s)));
   const personalBtn = li.querySelector(".personal");
   personalBtn.addEventListener("click", () => run(personalBtn, () => openPersonalDialog(s)));
 
@@ -340,6 +345,113 @@ $("pre-dialog").addEventListener("close", () => {
     .then(() => showMessage("사전 다운로드 범위를 바꾸고 동기화했습니다.", "info"))
     .catch((e) => showMessage(String(e)))
     .finally(() => refresh().catch(() => {}));
+});
+
+/** 난이도표 곡 받기 창. 표 주소는 이 PC가 읽고 서버에는 해시만 보낸다. */
+async function openTableDialog(s) {
+  $("table-title").textContent = `난이도표 곡 받기 · ${s.name}`;
+  $("table-url").value = "";
+  await refreshTables();
+  $("table-dialog").showModal();
+  tableTimer = setInterval(() => refreshTables().catch(() => {}), 2000);
+}
+
+function tableProgressText(d) {
+  const parts = [];
+  if (d.running) parts.push(`받는 중 ${d.done} / ${d.total}곡`);
+  else if (d.total || d.done) parts.push(`마지막 받기: ${d.done} / ${d.total}곡`);
+  if (d.waiting_until) {
+    const left = Math.max(0, d.waiting_until - Math.floor(Date.now() / 1000));
+    parts.push(`티켓 대기 ${left}초`);
+  }
+  if (d.failed) parts.push(`실패 ${d.failed}곡`);
+  if (d.not_synced) parts.push(`동기화 전이라 건너뜀 ${d.not_synced}곡`);
+  if (d.last_error) parts.push(`마지막 오류: ${d.last_error}`);
+  return parts.join(" · ");
+}
+
+async function refreshTables() {
+  const v = await invoke("user_tables");
+  const rows = v.tables.map((t) => {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = `${t.symbol} ${t.name}`;
+    name.title = t.url;
+    const songs = document.createElement("td");
+    songs.textContent = `${t.songs.length}곡 · ${bytes(t.bytes)} (차트 ${t.matched_charts}/${t.charts})`;
+    const td = document.createElement("td");
+    const remove = document.createElement("button");
+    remove.className = "danger";
+    remove.textContent = "빼기";
+    confirmClick(remove, "한 번 더", () =>
+      run(remove, async () => {
+        await invoke("remove_user_table", { url: t.url });
+        await refreshTables();
+      }),
+    );
+    td.append(remove);
+    tr.append(name, songs, td);
+    return tr;
+  });
+  $("table-rows").replaceChildren(...rows);
+  $("table-empty").hidden = v.tables.length > 0;
+
+  // 겹치는 곡은 한 번만 센다. 곡 크기는 표마다 합만 있으므로 겹침이 있으면 "최대"로 보여준다.
+  const ids = new Set(v.tables.flatMap((t) => t.songs));
+  const sum = v.tables.reduce((a, t) => a + t.bytes, 0);
+  const total = $("table-total");
+  total.hidden = !v.tables.length;
+  const overlap = ids.size < v.tables.reduce((a, t) => a + t.songs.length, 0);
+  total.textContent = `모두 ${ids.size}곡, ${overlap ? "최대 " : ""}${bytes(sum)}`;
+  if (sum > v.cache_limit) {
+    total.textContent += ` · 캐시 용량(${bytes(v.cache_limit)})보다 큽니다. 다른 곡은 캐시에 거의 남지 않습니다.`;
+  }
+
+  const d = v.download;
+  const progress = $("table-progress");
+  progress.textContent = tableProgressText(d);
+  progress.hidden = !progress.textContent;
+  $("table-start").hidden = d.running;
+  $("table-start").disabled = !v.tables.length;
+  $("table-stop").hidden = !d.running;
+}
+
+$("table-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const button = $("table-form").querySelector("button");
+  run(button, async () => {
+    showMessage("난이도표를 읽는 중입니다…", "info");
+    const t = await invoke("add_user_table", { url: $("table-url").value });
+    showMessage(`${t.name}: 서버에 있는 곡 ${t.songs.length}곡 (차트 ${t.matched_charts}/${t.charts})`, "info");
+    $("table-url").value = "";
+    await refreshTables();
+  });
+});
+
+$("table-start").addEventListener("click", () =>
+  run($("table-start"), async () => {
+    await invoke("start_table_download");
+    await refreshTables();
+  }),
+);
+$("table-stop").addEventListener("click", () =>
+  run($("table-stop"), async () => {
+    await invoke("stop_table_download");
+    await refreshTables();
+  }),
+);
+$("table-refresh").addEventListener("click", () =>
+  run($("table-refresh"), async () => {
+    const errors = await invoke("refresh_user_tables");
+    showMessage(errors.length ? `읽지 못한 표: ${errors.join("; ")}` : "난이도표를 다시 읽었습니다.", errors.length ? "error" : "info");
+    await refreshTables();
+  }),
+);
+
+$("table-dialog").addEventListener("close", () => {
+  clearInterval(tableTimer);
+  tableTimer = null;
+  refresh().catch(() => {});
 });
 
 /** 개인 채보 창. 연결한 채보 표와, 곡을 찾아 채보를 연결하는 부분. */
@@ -566,7 +678,7 @@ $("open-logs").addEventListener("click", () => run($("open-logs"), () => invoke(
 refresh().catch((e) => showMessage(String(e)));
 showLogPath().catch(() => {});
 setInterval(() => {
-  if (!loggingIn && !preOpen && !personalOpen) refresh().catch(() => {});
+  if (!loggingIn && !preOpen && !personalOpen && !tableTimer) refresh().catch(() => {});
 }, REFRESH_MS);
 
 // 숨은 개발자 도구. 화면에 여는 버튼은 없다.

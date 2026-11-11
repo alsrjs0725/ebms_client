@@ -16,6 +16,7 @@
 //! - [`preview`]: Qwilight 미리듣기 동안 플레이 파일을 받지 않기
 //! - [`openlog`]: 개발자 도구에 보여줄 파일 열기 기록 (메모리에만)
 //! - [`hub`]: 연결한 서버 (추가·삭제, 로그인, 동기화). 상주 앱이 쓴다
+//! - [`table`]: 사용자가 고른 난이도표 (이 PC가 직접 읽고 해시만 서버로)
 //! - [`notice`]: 서버 공지. 상주 앱이 켜질 때 아직 확인하지 않은 공지를 띄운다
 //! - [`update`]: 클라이언트 자동 업데이트 (GitHub Releases)
 
@@ -39,6 +40,7 @@ pub mod players;
 pub mod preview;
 pub mod session;
 pub mod sync;
+pub mod table;
 pub mod tree;
 pub mod update;
 

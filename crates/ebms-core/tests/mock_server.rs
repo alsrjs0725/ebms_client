@@ -55,6 +55,10 @@ struct Server {
     corrupt_chart: bool,
     /// `/api/pre/tables` 응답
     tables: serde_json::Value,
+    /// 난이도표 사이트(`/table/...`) 요청에 실려 온 Authorization 헤더 수. 0이어야 한다.
+    table_auth_headers: usize,
+    /// `/api/tables/match`로 받은 sha256
+    matched_requests: Vec<Vec<String>>,
 }
 
 #[derive(Default)]
@@ -198,7 +202,10 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
         .route(
             "/api/me",
             get(|State(s): State<AppState>, headers: HeaderMap| async move {
-                s.authorized(&headers).map(|_| axum::Json(me_json()))
+                s.authorized(&headers)?;
+                let mut me = me_json();
+                me["tickets"]["available"] = json!(s.server().tickets);
+                Ok::<_, StatusCode>(axum::Json(me))
             }),
         )
         // ---- 사전 다운로드 ----
@@ -307,6 +314,61 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                     Ok(data)
                 },
             ),
+        )
+        // ---- 사용자 난이도표 ----
+        .route(
+            "/api/tables/match",
+            post(
+                |State(s): State<AppState>, headers: HeaderMap, axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    s.authorized(&headers)?;
+                    let sha256: Vec<String> = body["sha256"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_str().unwrap().to_string())
+                        .collect();
+                    let mut server = s.server();
+                    let manifest: Vec<SongManifest> =
+                        serde_json::from_slice(&server.manifests[&0]).unwrap();
+                    let mut songs = Vec::new();
+                    let mut matched = Vec::new();
+                    for song in &manifest {
+                        let hits: Vec<_> = sha256.iter().filter(|h| song.charts.contains(h)).cloned().collect();
+                        if !hits.is_empty() {
+                            songs.push(json!({"id": song.song_id, "size": song.zip_size}));
+                            matched.extend(hits);
+                        }
+                    }
+                    server.matched_requests.push(sha256);
+                    Ok::<_, StatusCode>(axum::Json(
+                        json!({"songs": songs, "matched_md5": [], "matched_sha256": matched}),
+                    ))
+                },
+            ),
+        )
+        .route(
+            "/table/{name}",
+            get(|State(s): State<AppState>, Path(name): Path<String>, headers: HeaderMap| async move {
+                if headers.contains_key(header::AUTHORIZATION) {
+                    s.server().table_auth_headers += 1;
+                }
+                let sha_a = sha(&fixture().chart_a);
+                match name.as_str() {
+                    "index.html" => (
+                        [(header::CONTENT_TYPE, "text/html")],
+                        r#"<meta name="bmstable" content="header.json">"#.to_string(),
+                    )
+                        .into_response(),
+                    "header.json" => axum::Json(json!({"name": "Test Table", "symbol": "T", "data_url": "data.json"}))
+                        .into_response(),
+                    "data.json" => axum::Json(json!([
+                        {"sha256": sha_a, "level": "1", "title": "Test"},
+                        {"md5": "0".repeat(32), "level": "2", "title": "Not on server"},
+                    ]))
+                    .into_response(),
+                    _ => StatusCode::NOT_FOUND.into_response(),
+                }
+            }),
         )
         // ---- 플레이 다운로드 ----
         .route(
@@ -1507,4 +1569,94 @@ fn other_players_ignore_qwilight_preview_rule() {
     read_all(&fs, &format!("{SONG}/preview.ogg")).unwrap();
     read_all(&fs, &format!("{SONG}/bgm01.wav")).unwrap();
     assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+}
+
+/// 사용자가 고른 난이도표: 표는 클라이언트가 직접(세션키 없이) 읽고, 서버에는 해시만 보낸다.
+/// 곡 받기는 구동기용 티켓 1개를 남기고, 받은 곡은 "항상 보관"한다.
+#[test]
+fn user_table_downloads_matched_songs_and_pins_them() {
+    let rt = runtime();
+    let (state, fixture) = server_state();
+    state.server().sessions.clear();
+    let url = spawn_server(&rt, state.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let hub = Hub::open(AppDir::new(dir.path()), false, rt.handle().clone()).unwrap();
+    let server = rt.block_on(async {
+        let server = hub.add(&url, Some("S")).await.unwrap();
+        hub.login(Duration::from_secs(10), fake_browser)
+            .await
+            .unwrap();
+        hub.sync().await;
+        server
+    });
+
+    let table = rt
+        .block_on(server.add_user_table(&format!("{url}/table/index.html")))
+        .unwrap();
+    assert_eq!(table.name, "Test Table");
+    assert_eq!((table.charts, table.matched_charts), (2, 1));
+    assert_eq!(table.songs, vec![1]);
+    assert_eq!(
+        state.server().table_auth_headers,
+        0,
+        "session key must not go to the table host"
+    );
+    assert_eq!(
+        state.server().matched_requests,
+        vec![vec![sha(&fixture.chart_a)]]
+    );
+    assert_eq!(server.user_tables().unwrap(), vec![table.clone()]);
+
+    // 티켓이 남길 1개뿐이면 받지 않고 기다린다.
+    state.server().tickets = 1;
+    let waiting = {
+        let server = server.clone();
+        rt.spawn(async move { server.download_tables().await })
+    };
+    rt.block_on(async {
+        for _ in 0..100 {
+            if server.table_download().waiting_until.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    assert!(server.table_download().running);
+    assert!(server.table_download().waiting_until.is_some());
+    assert_eq!(state.counters.play.load(Ordering::SeqCst), 0);
+    server.stop_table_download();
+    rt.block_on(waiting).unwrap().unwrap();
+    assert!(!server.table_download().running);
+
+    // 티켓이 있으면 받는다.
+    state.server().tickets = 5;
+    rt.block_on(server.download_tables()).unwrap();
+    let st = server.table_download();
+    assert_eq!((st.total, st.done, st.failed), (1, 1, 0));
+    assert_eq!(state.counters.play.load(Ordering::SeqCst), 1);
+    let usage = server.usage().unwrap();
+    assert!(usage.cache_bytes > 0);
+
+    // 고정된 곡은 캐시를 비워도 남는다. 표를 빼면 고정이 풀린다.
+    assert_eq!(rt.block_on(server.clear_cache()).unwrap(), 0);
+    let bgm = format!("S/{SONG}/bgm01.wav");
+    assert_eq!(
+        read_all(hub.drive().as_ref(), &bgm).unwrap(),
+        fixture.files[1].1
+    );
+    assert_eq!(
+        state.counters.play.load(Ordering::SeqCst),
+        1,
+        "no second download"
+    );
+    // 이미 받은 곡은 다시 받지 않는다.
+    rt.block_on(server.download_tables()).unwrap();
+    assert_eq!(server.table_download().total, 0);
+
+    server.remove_user_table(&table.url).unwrap();
+    assert!(server.user_tables().unwrap().is_empty());
+    assert_eq!(
+        rt.block_on(server.clear_cache()).unwrap(),
+        usage.cache_bytes
+    );
 }

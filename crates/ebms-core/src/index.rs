@@ -175,6 +175,29 @@ impl Index {
         Ok(())
     }
 
+    /// 사용자가 고른 난이도표 (곡 받기용). 고른 순.
+    pub fn user_tables(&self) -> Result<Vec<crate::table::UserTable>> {
+        let value: Option<String> = self
+            .con()
+            .query_row(
+                "SELECT value FROM setting WHERE name = 'user_tables'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(value
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default())
+    }
+
+    pub fn set_user_tables(&self, tables: &[crate::table::UserTable]) -> Result<()> {
+        self.con().execute(
+            "INSERT OR REPLACE INTO setting (name, value) VALUES ('user_tables', ?1)",
+            [serde_json::to_string(tables)?],
+        )?;
+        Ok(())
+    }
+
     pub fn chunk_hashes(&self, kind: ChunkKind) -> Result<BTreeMap<u32, String>> {
         let con = self.con();
         let mut stmt = con.prepare("SELECT id, sha256 FROM chunk WHERE kind = ?1")?;
@@ -558,6 +581,21 @@ impl Index {
         let tx = con.transaction()?;
         tx.execute("DELETE FROM cache_entry WHERE song_id = ?1", [song_id])?;
         tx.execute("DELETE FROM cache_song WHERE song_id = ?1", [song_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `songs`의 캐시 항목만 고정하고 나머지는 고정을 푼다.
+    pub fn cache_pin_only(&self, songs: &std::collections::BTreeSet<u32>) -> Result<()> {
+        let mut con = self.con();
+        let tx = con.transaction()?;
+        tx.execute("UPDATE cache_entry SET pinned = 0 WHERE pinned <> 0", [])?;
+        {
+            let mut stmt = tx.prepare("UPDATE cache_entry SET pinned = 1 WHERE song_id = ?1")?;
+            for id in songs {
+                stmt.execute([id])?;
+            }
+        }
         tx.commit()?;
         Ok(())
     }

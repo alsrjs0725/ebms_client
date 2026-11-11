@@ -171,6 +171,24 @@ impl PreTables {
     }
 }
 
+/// `POST /api/tables/match`의 곡 하나.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct MatchedSong {
+    pub id: u32,
+    /// 곡 zip 크기
+    pub size: u64,
+}
+
+/// `POST /api/tables/match` 응답. 보낸 차트 해시에 맞는 서버 곡.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct TableMatch {
+    pub songs: Vec<MatchedSong>,
+    #[serde(default)]
+    pub matched_md5: Vec<String>,
+    #[serde(default)]
+    pub matched_sha256: Vec<String>,
+}
+
 /// `GET /api/pre/sizes`의 청크 하나.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct ChunkSize {
@@ -391,6 +409,16 @@ impl Api {
             tables: raw.tables,
             chunks,
         })
+    }
+
+    /// 사용자가 고른 난이도표의 차트 해시에 맞는 곡. 표 주소는 보내지 않는다([`crate::table`]).
+    pub async fn match_table(&self, md5: &[String], sha256: &[String]) -> Result<TableMatch> {
+        let resp = self
+            .request(Method::POST, self.url("/api/tables/match"))
+            .json(&serde_json::json!({ "md5": md5, "sha256": sha256 }))
+            .send()
+            .await?;
+        Ok(self.check(resp, StatusCode::OK)?.json().await?)
     }
 
     /// 차트·사전 청크의 크기.
