@@ -107,7 +107,7 @@ async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncRepo
     let mut remote = api.pre_hash().await?;
     let local = index.chunk_hashes(ChunkKind::Pre)?;
     // 난이도표를 골랐으면 그 표의 태그가 붙은 청크만 받고, 나머지는 로컬에서도 뺀다.
-    // 빠진 곡의 사전 파일은 읽을 때 하나씩 받는다.
+    // 빠진 청크의 곡은 구동기에서 보이지 않는다([`crate::tree::Tree::open`]).
     if let Some(selected) = index.pre_tables()? {
         let wanted = api.pre_tables().await?.chunks_for(&selected);
         remote.retain(|id, _| wanted.contains(id));

@@ -179,6 +179,7 @@ impl Server {
         }
         self.client.index.set_user_tables(&tables)?;
         self.apply_table_pins()?;
+        self.reload_if_filtered().await;
         Ok(table)
     }
 
@@ -201,15 +202,25 @@ impl Server {
         tables.retain(|t| current.contains(&t.url));
         self.client.index.set_user_tables(&tables)?;
         self.apply_table_pins()?;
+        self.reload_if_filtered().await;
         Ok(errors)
     }
 
     /// 표를 빼고, 다른 표에 없는 곡의 "항상 보관"을 푼다(캐시 한도에 따라 지워질 수 있게).
-    pub fn remove_user_table(&self, url: &str) -> Result<()> {
+    pub async fn remove_user_table(&self, url: &str) -> Result<()> {
         let mut tables = self.user_tables()?;
         tables.retain(|t| t.url != url);
         self.client.index.set_user_tables(&tables)?;
-        self.apply_table_pins()
+        self.apply_table_pins()?;
+        self.reload_if_filtered().await;
+        Ok(())
+    }
+
+    /// 사전 다운로드 표를 골라 곡 목록을 거르고 있으면, 고른 표의 곡이 바뀌었으니 가상 트리를 다시 만든다.
+    async fn reload_if_filtered(&self) {
+        if matches!(self.client.index.pre_tables(), Ok(Some(_))) {
+            self.reload().await;
+        }
     }
 
     async fn check_user_table(&self, url: &str) -> Result<UserTable> {

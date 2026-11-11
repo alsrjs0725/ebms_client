@@ -315,6 +315,14 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// 로컬 사전 청크에 파일이 있는 곡.
+    pub fn pre_song_ids(&self) -> Result<std::collections::HashSet<u32>> {
+        let con = self.con();
+        let mut stmt = con.prepare("SELECT DISTINCT song_id FROM pre_file")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// 매니페스트 청크 하나의 곡 목록과 해시를 한 트랜잭션으로 바꾼다.
     pub fn replace_manifest_chunk(
         &self,
