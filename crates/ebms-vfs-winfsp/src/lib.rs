@@ -191,6 +191,9 @@ impl FileSystemContext for WinFs {
                 .record(file_name.to_string_lossy(), attr.size, pid, || {
                     process::exe(pid)
                 });
+            // 다시 읽는 파일 내용은 Windows 캐시에서 나가 읽기가 오지 않으므로, Qwilight 미리듣기는 열 때 알린다.
+            self.fs
+                .opened(attr.ino, &ProcessCaller::new(pid, self.players.clone()));
         }
         Ok(Handle {
             ino: attr.ino,

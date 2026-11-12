@@ -1767,6 +1767,27 @@ fn selected_difficulty_tables_sync_only_matching_chart_chunks() {
 }
 
 #[test]
+fn qwilight_preview_gate_opens_on_open() {
+    // 다시 읽는 preview 음원은 Windows 캐시에서 나가 읽기가 오지 않는다. 열기만 알려도 게이트가 열린다.
+    let env = setup(true);
+    env.rt.block_on(env.client.sync()).unwrap();
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    let preview = fs.resolve(&format!("{SONG}/preview.ogg")).unwrap();
+    fs.opened(preview.ino, &Qwilight);
+    let err = read_all_as(&fs, &format!("{SONG}/bgm01.wav"), &Qwilight).unwrap_err();
+    assert!(matches!(err, Error::PreviewOnly), "{err}");
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 0);
+
+    // 거절한 뒤 잠시 끊겼다 다른 키음을 읽으면 플레이 시작으로 보고 받는다(키음이 빠지지 않게).
+    std::thread::sleep(ebms_core::preview::GAP + std::time::Duration::from_millis(50));
+    assert_eq!(
+        read_all_as(&fs, &format!("{SONG}/bga/movie.mp4"), &Qwilight).unwrap(),
+        env.want("bga/movie.mp4")
+    );
+    assert_eq!(env.state.counters.play.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn changing_tables_during_sync_stops_old_scope_and_next_sync_follows_new() {
     let env = setup_with_pre_chunk();
     {
