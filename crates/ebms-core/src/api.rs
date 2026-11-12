@@ -29,6 +29,8 @@ const MAX_RESUME: u32 = 3;
 
 /// 사전 파일 하나를 받는 전체 시간 상한. 감속 중에도 프리뷰 몇 MB는 받을 수 있게 넉넉히.
 const PRE_FILE_TIMEOUT: Duration = Duration::from_secs(300);
+/// `POST /api/pre/song_chunks` 한 번에 보내는 곡 수(서버 한도 20000).
+const SONG_CHUNKS_MAX: usize = 10_000;
 
 #[derive(Debug, Deserialize)]
 pub struct Version {
@@ -158,6 +160,8 @@ pub struct PreTables {
     pub tables: Vec<DifficultyTable>,
     /// 사전 청크 id → 난이도표 id들. 난이도표의 곡이 없는 청크는 없다.
     pub chunks: BTreeMap<u32, Vec<u32>>,
+    /// 차트 청크도 사전 청크와 같은 번호로 묶여 있는지(`chart_layout: "pre"`). 그러면 차트 청크도 같은 번호만 받으면 된다.
+    pub charts_by_pre: bool,
 }
 
 impl PreTables {
@@ -394,6 +398,8 @@ impl Api {
         struct Raw {
             tables: Vec<DifficultyTable>,
             chunks: BTreeMap<String, Vec<u32>>,
+            #[serde(default)]
+            chart_layout: Option<String>,
         }
         let raw: Raw = self.get("/api/pre/tables").await?.json().await?;
         let chunks = raw
@@ -408,7 +414,32 @@ impl Api {
         Ok(PreTables {
             tables: raw.tables,
             chunks,
+            charts_by_pre: raw.chart_layout.as_deref() == Some("pre"),
         })
+    }
+
+    /// 곡들이 든 사전 청크 번호. 지운 곡은 빠진다. [`PreTables::charts_by_pre`]인 서버에만 있다.
+    pub async fn song_chunks(&self, songs: &[u32]) -> Result<BTreeMap<u32, u32>> {
+        #[derive(Deserialize)]
+        struct Raw {
+            chunks: BTreeMap<String, u32>,
+        }
+        let mut out = BTreeMap::new();
+        for part in songs.chunks(SONG_CHUNKS_MAX) {
+            let resp = self
+                .request(Method::POST, self.url("/api/pre/song_chunks"))
+                .json(&serde_json::json!({ "songs": part }))
+                .send()
+                .await?;
+            let raw: Raw = self.check(resp, StatusCode::OK)?.json().await?;
+            for (k, v) in raw.chunks {
+                let id = k.parse().map_err(|_| {
+                    Error::Other(format!("bad song id {k:?} from /api/pre/song_chunks"))
+                })?;
+                out.insert(id, v);
+            }
+        }
+        Ok(out)
     }
 
     /// 사용자가 고른 난이도표의 차트 해시에 맞는 곡. 표 주소는 보내지 않는다([`crate::table`]).
