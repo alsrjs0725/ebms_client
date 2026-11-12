@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -125,6 +126,9 @@ pub type CacheSongVersion = (u32, Option<String>, Option<String>);
 /// 로컬 SQLite 인덱스.
 pub struct Index {
     con: Mutex<Connection>,
+    /// 받을 범위(사전 다운로드 표·사용자가 고른 표)를 바꿀 때마다 1씩 는다.
+    /// 진행 중인 동기화가 시작 때 값과 비교해 옛 범위로 계속 받지 않게 한다([`crate::sync`]).
+    selection_gen: AtomicU64,
 }
 
 impl Index {
@@ -135,7 +139,17 @@ impl Index {
         con.execute_batch(SCHEMA)?;
         Ok(Self {
             con: Mutex::new(con),
+            selection_gen: AtomicU64::new(0),
         })
+    }
+
+    /// 받을 범위가 바뀐 횟수. 값 자체는 의미 없고 바뀌었는지만 본다.
+    pub fn selection_gen(&self) -> u64 {
+        self.selection_gen.load(Ordering::SeqCst)
+    }
+
+    fn bump_selection(&self) {
+        self.selection_gen.fetch_add(1, Ordering::SeqCst);
     }
 
     fn con(&self) -> std::sync::MutexGuard<'_, Connection> {
@@ -172,6 +186,7 @@ impl Index {
                 con.execute("DELETE FROM setting WHERE name = 'pre_tables'", [])?;
             }
         }
+        self.bump_selection();
         Ok(())
     }
 
@@ -195,6 +210,7 @@ impl Index {
             "INSERT OR REPLACE INTO setting (name, value) VALUES ('user_tables', ?1)",
             [serde_json::to_string(tables)?],
         )?;
+        self.bump_selection();
         Ok(())
     }
 

@@ -61,6 +61,8 @@ struct Server {
     matched_requests: Vec<Vec<String>>,
     /// `/api/pre/song_chunks`: 곡 → 사전 청크
     song_chunks: HashMap<u32, u32>,
+    /// 차트 청크를 보내기 직전에 한 번 부른다. 받는 도중 사용자가 설정을 바꾸는 흉내.
+    on_chart_download: Option<Box<dyn FnOnce() + Send>>,
 }
 
 #[derive(Default)]
@@ -277,6 +279,10 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
             get(|State(s): State<AppState>, Path(id): Path<u32>, headers: HeaderMap| async move {
                 s.authorized(&headers)?;
                 let n = s.counters.chart_chunk.fetch_add(1, Ordering::SeqCst);
+                let hook = s.server().on_chart_download.take();
+                if let Some(hook) = hook {
+                    hook();
+                }
                 let mut server = s.server();
                 if server.appends_on_download > 0 {
                     server.appends_on_download -= 1;
@@ -1758,4 +1764,51 @@ fn selected_difficulty_tables_sync_only_matching_chart_chunks() {
     assert_eq!(p.chart_for(Some(&[1])), (size(1), 1));
     let report = env.rt.block_on(env.client.sync()).unwrap();
     assert_eq!(report.chart_chunks_updated, vec![1]);
+}
+
+#[test]
+fn changing_tables_during_sync_stops_old_scope_and_next_sync_follows_new() {
+    let env = setup_with_pre_chunk();
+    {
+        let mut server = env.state.server();
+        for (id, title) in [(1, "One"), (2, "Two")] {
+            let chart = format!("#TITLE {title}\r\n").into_bytes();
+            server.chart_chunks.insert(
+                id,
+                chart_chunk(&[(&format!("{}.bms", sha(&chart)), &chart)]),
+            );
+        }
+        server
+            .pre_chunks
+            .insert(1, pre_chunk(40, &[("banner.png", b"other")]));
+        server.tables = json!({
+            "tables": [{"id": 1, "name": "Insane", "symbol": "★"}, {"id": 2, "name": "Normal", "symbol": "☆"}],
+            "chunks": {"0": [1], "1": [2]},
+            "chart_layout": "pre",
+        });
+        // 전곡으로 받기 시작한 뒤 첫 차트 청크를 받는 중에 표 2만 고른다.
+        let index = env.client.index.clone();
+        server.on_chart_download = Some(Box::new(move || {
+            index.set_pre_tables(Some(&[2])).unwrap();
+        }));
+    }
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert!(report.interrupted);
+    // 옛 범위(전곡)로 나머지를 받지 않고, 사전 청크도 받지 않는다.
+    assert!(report.chart_chunks_updated.len() < 3, "{report:?}");
+    assert!(report.pre_chunks_updated.is_empty());
+
+    // 다시 동기화하면 새 범위(표 2 = 청크 1)만 남는다.
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert!(!report.interrupted);
+    let index = &env.client.index;
+    let keys = |kind| {
+        index
+            .chunk_hashes(kind)
+            .unwrap()
+            .into_keys()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(keys(ebms_core::index::ChunkKind::Chart), vec![1]);
+    assert_eq!(keys(ebms_core::index::ChunkKind::Pre), vec![1]);
 }

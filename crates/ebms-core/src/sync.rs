@@ -27,6 +27,8 @@ pub struct SyncReport {
     pub pre_chunks_removed: Vec<u32>,
     /// 차트 청크와 같은 이유로 건너뛴 사전 청크.
     pub pre_chunks_skipped: Vec<u32>,
+    /// 받는 도중 받을 범위(난이도표)가 바뀌어 멈췄다. 받은 만큼은 반영돼 있고, 새 범위로 다시 동기화해야 한다.
+    pub interrupted: bool,
 }
 
 impl SyncReport {
@@ -46,22 +48,46 @@ pub async fn sync_all(api: &Api, paths: &Paths, index: &Index) -> Result<SyncRep
         return Err(Error::ApiVersion(version.api));
     }
     let mut report = SyncReport::default();
+    // 범위를 읽기 전에 세대를 잡는다. 읽은 뒤 바뀌면 아래에서 멈춘다.
+    let plan = Plan {
+        index,
+        start: index.selection_gen(),
+    };
     let wanted = wanted_chunks(api, index).await?;
     let charts = wanted.as_ref().and_then(|w| w.charts.as_ref());
-    sync_charts(api, paths, index, charts, &mut report).await?;
+    sync_charts(api, paths, index, charts, &plan, &mut report).await?;
     sync_manifests(api, index, &mut report).await?;
-    sync_pre(
-        api,
-        paths,
-        index,
-        wanted.as_ref().map(|w| &w.pre),
-        &mut report,
-    )
-    .await?;
+    if !report.interrupted {
+        sync_pre(
+            api,
+            paths,
+            index,
+            wanted.as_ref().map(|w| &w.pre),
+            &plan,
+            &mut report,
+        )
+        .await?;
+    }
+    if report.interrupted {
+        info!(?report, "sync interrupted, download scope changed");
+        return Ok(report);
+    }
     if report.changed() {
         info!(?report, "sync finished");
     }
     Ok(report)
+}
+
+/// 동기화를 시작할 때 정한 받을 범위. 도중에 사용자가 표를 바꾸면 옛 범위로 계속 받지 않고 멈춘다.
+struct Plan<'a> {
+    index: &'a Index,
+    start: u64,
+}
+
+impl Plan<'_> {
+    fn stale(&self) -> bool {
+        self.index.selection_gen() != self.start
+    }
 }
 
 /// 난이도표를 골랐을 때 받을 청크. 고르지 않았으면(전곡) 없다.
@@ -109,6 +135,7 @@ async fn sync_charts(
     paths: &Paths,
     index: &Index,
     wanted: Option<&BTreeSet<u32>>,
+    plan: &Plan<'_>,
     report: &mut SyncReport,
 ) -> Result<()> {
     let mut remote = api.chart_hash().await?;
@@ -145,9 +172,19 @@ async fn sync_charts(
         tmp.persist(&dest)?;
         index.replace_chart_chunk(id, &sha, &charts)?;
         report.chart_chunks_updated.push(id);
+        // 다 받은 청크는 반영하고, 나머지(받는 중인 것 포함)는 버린다. 옛 범위 밖 청크는 다음 동기화가 뺀다.
+        if plan.stale() {
+            report.interrupted = true;
+            break;
+        }
     }
     report.chart_chunks_updated.sort_unstable();
     report.chart_chunks_skipped.sort_unstable();
+    // 범위가 바뀌었으면 옛 범위로 지우지 않는다. 새 범위로 다시 동기화할 때 정리한다.
+    if report.interrupted || plan.stale() {
+        report.interrupted = true;
+        return Ok(());
+    }
 
     // 파일은 다음 정리에서 지운다. 지금 트리가 아직 읽을 수 있다.
     for &id in local.keys().filter(|id| !remote.contains_key(id)) {
@@ -162,6 +199,7 @@ async fn sync_pre(
     paths: &Paths,
     index: &Index,
     wanted: Option<&BTreeSet<u32>>,
+    plan: &Plan<'_>,
     report: &mut SyncReport,
 ) -> Result<()> {
     let mut remote = api.pre_hash().await?;
@@ -195,9 +233,17 @@ async fn sync_pre(
         tmp.persist(&dest)?;
         index.replace_pre_chunk(id, &sha, &files)?;
         report.pre_chunks_updated.push(id);
+        if plan.stale() {
+            report.interrupted = true;
+            break;
+        }
     }
     report.pre_chunks_updated.sort_unstable();
     report.pre_chunks_skipped.sort_unstable();
+    if report.interrupted || plan.stale() {
+        report.interrupted = true;
+        return Ok(());
+    }
 
     for &id in local.keys().filter(|id| !remote.contains_key(id)) {
         index.remove_pre_chunk(id)?;
