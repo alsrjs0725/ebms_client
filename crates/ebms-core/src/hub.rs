@@ -501,12 +501,21 @@ impl Server {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .running = true;
-        let result = self.client.sync().await;
-        // 인덱스를 읽으므로 런타임 밖에서, 설정 창이 기다리지 않게 상태 잠금 밖에서.
-        // 실패해도 일부 청크는 바뀌었을 수 있다. 다음 동기화가 옛 청크 판을 지우기 전에 다시 만든다.
-        if !matches!(&result, Ok(report) if !report.changed()) {
-            self.reload().await;
-        }
+        let result = loop {
+            let result = self.client.sync().await;
+            // 인덱스를 읽으므로 런타임 밖에서, 설정 창이 기다리지 않게 상태 잠금 밖에서.
+            // 실패해도 일부 청크는 바뀌었을 수 있다. 다음 동기화가 옛 청크 판을 지우기 전에 다시 만든다.
+            if !matches!(&result, Ok(report) if !report.changed()) {
+                self.reload().await;
+            }
+            // 받는 도중 난이도표를 바꿨으면 바뀐 범위로 이어서 받는다(이미 받은 청크는 다시 받지 않음).
+            match &result {
+                Ok(report) if report.interrupted && !self.removed.load(Ordering::SeqCst) => {
+                    info!(server = %self.entry.name, "download scope changed, syncing again");
+                }
+                _ => break result,
+            }
+        };
         let mut status = self.status.lock().unwrap_or_else(|e| e.into_inner());
         status.running = false;
         let saved = match &result {
