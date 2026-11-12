@@ -59,6 +59,8 @@ struct Server {
     table_auth_headers: usize,
     /// `/api/tables/match`로 받은 sha256
     matched_requests: Vec<Vec<String>>,
+    /// `/api/pre/song_chunks`: 곡 → 사전 청크
+    song_chunks: HashMap<u32, u32>,
 }
 
 #[derive(Default)]
@@ -312,6 +314,25 @@ fn spawn_server(rt: &tokio::runtime::Runtime, state: AppState) -> String {
                     let mut data = Vec::new();
                     zip.by_name(path).unwrap().read_to_end(&mut data).unwrap();
                     Ok(data)
+                },
+            ),
+        )
+        .route(
+            "/api/pre/song_chunks",
+            post(
+                |State(s): State<AppState>, headers: HeaderMap, axum::Json(body): axum::Json<serde_json::Value>| async move {
+                    s.authorized(&headers)?;
+                    let server = s.server();
+                    let chunks: HashMap<String, u32> = body["songs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|v| {
+                            let id = v.as_u64().unwrap() as u32;
+                            server.song_chunks.get(&id).map(|c| (id.to_string(), *c))
+                        })
+                        .collect();
+                    Ok::<_, StatusCode>(axum::Json(json!({ "chunks": chunks })))
                 },
             ),
         )
@@ -1677,4 +1698,64 @@ fn user_table_downloads_matched_songs_and_pins_them() {
         rt.block_on(server.clear_cache()).unwrap(),
         usage.cache_bytes
     );
+}
+
+#[test]
+fn selected_difficulty_tables_sync_only_matching_chart_chunks() {
+    let env = setup_with_pre_chunk();
+    {
+        let mut server = env.state.server();
+        let other = b"#TITLE Other\r\n".as_slice();
+        let user = b"#TITLE User\r\n".as_slice();
+        server
+            .chart_chunks
+            .insert(1, chart_chunk(&[(&format!("{}.bms", sha(other)), other)]));
+        server
+            .chart_chunks
+            .insert(2, chart_chunk(&[(&format!("{}.bms", sha(user)), user)]));
+        server.song_chunks.insert(7, 2);
+        server.tables = json!({
+            "tables": [{"id": 1, "name": "Insane", "symbol": "★"}, {"id": 2, "name": "Normal", "symbol": "☆"}],
+            "chunks": {"0": [1], "1": [2]},
+            "chart_layout": "pre",
+        });
+    }
+    let index = &env.client.index;
+    let p = env.rt.block_on(env.client.pending_download()).unwrap();
+    let size = |id: u32| env.state.server().chart_chunks[&id].len() as u64;
+    assert!(p.charts_by_pre);
+    assert_eq!(p.chart_for(None), (size(0) + size(1) + size(2), 3));
+    assert_eq!(p.chart_for(Some(&[2])), (size(1), 1));
+
+    // 고른 표의 사전 청크와 같은 번호의 차트 청크만 받는다.
+    index.set_pre_tables(Some(&[2])).unwrap();
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.chart_chunks_updated, vec![1]);
+
+    // 사용자가 직접 고른 표의 곡이 든 차트 청크도 받는다.
+    index
+        .set_user_tables(&[ebms_core::table::UserTable {
+            url: "https://t.example/u".into(),
+            songs: vec![7],
+            ..Default::default()
+        }])
+        .unwrap();
+    let p = env.rt.block_on(env.client.pending_download()).unwrap();
+    assert_eq!(p.chart_for(Some(&[2])), (size(2), 1));
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.chart_chunks_updated, vec![2]);
+
+    // 표를 바꾸면 빠진 차트 청크는 로컬에서도 뺀다.
+    index.set_pre_tables(Some(&[1])).unwrap();
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.chart_chunks_updated, vec![0]);
+    assert_eq!(report.chart_chunks_removed, vec![1]);
+
+    // 차트 청크를 사전 청크 번호로 묶지 않은 서버면 표를 골라도 차트 청크는 모두 받는다.
+    env.state.server().tables["chart_layout"] = json!("legacy");
+    let p = env.rt.block_on(env.client.pending_download()).unwrap();
+    assert!(!p.charts_by_pre);
+    assert_eq!(p.chart_for(Some(&[1])), (size(1), 1));
+    let report = env.rt.block_on(env.client.sync()).unwrap();
+    assert_eq!(report.chart_chunks_updated, vec![1]);
 }

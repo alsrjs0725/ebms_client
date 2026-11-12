@@ -179,7 +179,7 @@ impl Server {
         }
         self.client.index.set_user_tables(&tables)?;
         self.apply_table_pins()?;
-        self.reload_if_filtered().await;
+        self.sync_if_filtered().await;
         Ok(table)
     }
 
@@ -202,8 +202,23 @@ impl Server {
         tables.retain(|t| current.contains(&t.url));
         self.client.index.set_user_tables(&tables)?;
         self.apply_table_pins()?;
-        self.reload_if_filtered().await;
+        self.sync_if_filtered().await;
         Ok(errors)
+    }
+
+    /// 사전 다운로드 표를 골랐으면 고른 표의 곡이 바뀌었으니, 새로 든 곡의 차트를 받도록 바로 동기화하고 가상 트리를 다시 만든다.
+    /// 실패해도 표는 그대로 두고 상태에 남긴다(다음 동기화에 받음).
+    async fn sync_if_filtered(&self) {
+        if !matches!(self.client.index.pre_tables(), Ok(Some(_))) {
+            return;
+        }
+        match self.sync().await {
+            // 받은 게 없으면 동기화가 트리를 다시 만들지 않지만, 고른 표의 곡이 바뀌었으니 다시 만든다.
+            Ok(report) if !report.changed() => self.reload().await,
+            Ok(_) => {}
+            // 실패해도 동기화가 트리를 다시 만든다.
+            Err(e) => warn!(server = %self.entry.name, %e, "sync after table change failed"),
+        }
     }
 
     /// 표를 빼고, 다른 표에 없는 곡의 "항상 보관"을 푼다(캐시 한도에 따라 지워질 수 있게).
@@ -799,6 +814,14 @@ fn _table_futures_are_send(server: std::sync::Arc<Server>) {
     send(server.download_tables());
     send(server.add_user_table(""));
     send(server.refresh_user_tables());
+}
+
+/// 앱 명령(`spawn`)에서 기다리므로 표 바꾸기(동기화 포함)는 `Send`여야 한다.
+#[allow(dead_code)]
+fn user_table_changes_are_send(server: &Server) {
+    fn is_send<T: Send>(_: T) {}
+    is_send(server.add_user_table(""));
+    is_send(server.refresh_user_tables());
 }
 
 #[cfg(test)]

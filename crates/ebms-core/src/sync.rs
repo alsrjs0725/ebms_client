@@ -3,7 +3,7 @@
 //! 차트 청크, 매니페스트, 사전 청크(곡들의 배너·스테이지파일·프리뷰 등)를 받는다.
 //! 나머지(키음·BGA)는 플레이할 때 곡 zip 전체로 받는다([`crate::fetch`]).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
 use futures_util::{StreamExt, stream};
@@ -46,22 +46,76 @@ pub async fn sync_all(api: &Api, paths: &Paths, index: &Index) -> Result<SyncRep
         return Err(Error::ApiVersion(version.api));
     }
     let mut report = SyncReport::default();
-    sync_charts(api, paths, index, &mut report).await?;
+    let wanted = wanted_chunks(api, index).await?;
+    let charts = wanted.as_ref().and_then(|w| w.charts.as_ref());
+    sync_charts(api, paths, index, charts, &mut report).await?;
     sync_manifests(api, index, &mut report).await?;
-    sync_pre(api, paths, index, &mut report).await?;
+    sync_pre(
+        api,
+        paths,
+        index,
+        wanted.as_ref().map(|w| &w.pre),
+        &mut report,
+    )
+    .await?;
     if report.changed() {
         info!(?report, "sync finished");
     }
     Ok(report)
 }
 
+/// 난이도표를 골랐을 때 받을 청크. 고르지 않았으면(전곡) 없다.
+struct WantedChunks {
+    /// 고른 표의 태그가 붙은 사전 청크
+    pre: BTreeSet<u32>,
+    /// 받을 차트 청크. 서버가 차트 청크를 사전 청크와 같은 번호로 묶지 않았으면(이전 서버) 없고, 그때는 전부 받는다.
+    charts: Option<BTreeSet<u32>>,
+}
+
+/// 고른 난이도표로 받을 청크를 정한다. 차트 청크는 고른 표의 사전 청크와 같은 번호에, 사용자가 직접 고른 표의 곡이 든
+/// 번호를 더한다(그 곡도 구동기에 보이므로 차트가 있어야 한다).
+async fn wanted_chunks(api: &Api, index: &Index) -> Result<Option<WantedChunks>> {
+    let Some(selected) = index.pre_tables()? else {
+        return Ok(None);
+    };
+    let tags = api.pre_tables().await?;
+    let pre = tags.chunks_for(&selected);
+    let charts = if tags.charts_by_pre {
+        let mut charts = pre.clone();
+        charts.extend(user_table_chunks(api, index).await?);
+        Some(charts)
+    } else {
+        None
+    };
+    Ok(Some(WantedChunks { pre, charts }))
+}
+
+/// 사용자가 직접 고른 표의 곡이 든 사전 청크(= 차트 청크) 번호.
+async fn user_table_chunks(api: &Api, index: &Index) -> Result<BTreeSet<u32>> {
+    let songs: BTreeSet<u32> = index
+        .user_tables()?
+        .into_iter()
+        .flat_map(|t| t.songs)
+        .collect();
+    if songs.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let songs: Vec<u32> = songs.into_iter().collect();
+    Ok(api.song_chunks(&songs).await?.into_values().collect())
+}
+
 async fn sync_charts(
     api: &Api,
     paths: &Paths,
     index: &Index,
+    wanted: Option<&BTreeSet<u32>>,
     report: &mut SyncReport,
 ) -> Result<()> {
-    let remote = api.chart_hash().await?;
+    let mut remote = api.chart_hash().await?;
+    // 난이도표를 골랐으면 그 표의 곡이 든 차트 청크만 받고, 나머지는 로컬에서도 뺀다(사전 청크와 같음).
+    if let Some(wanted) = wanted {
+        remote.retain(|id, _| wanted.contains(id));
+    }
     let local = index.chunk_hashes(ChunkKind::Chart)?;
 
     // 클로저가 빌린 참조를 받으면 future가 `Send`로 증명되지 않아(앱의 `spawn`) 소유한 값으로 넘긴다.
@@ -103,13 +157,18 @@ async fn sync_charts(
     Ok(())
 }
 
-async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncReport) -> Result<()> {
+async fn sync_pre(
+    api: &Api,
+    paths: &Paths,
+    index: &Index,
+    wanted: Option<&BTreeSet<u32>>,
+    report: &mut SyncReport,
+) -> Result<()> {
     let mut remote = api.pre_hash().await?;
     let local = index.chunk_hashes(ChunkKind::Pre)?;
     // 난이도표를 골랐으면 그 표의 태그가 붙은 청크만 받고, 나머지는 로컬에서도 뺀다.
     // 빠진 청크의 곡은 구동기에서 보이지 않는다([`crate::tree::Tree::open`]).
-    if let Some(selected) = index.pre_tables()? {
-        let wanted = api.pre_tables().await?.chunks_for(&selected);
+    if let Some(wanted) = wanted {
         remote.retain(|id, _| wanted.contains(id));
     }
 
@@ -151,9 +210,14 @@ async fn sync_pre(api: &Api, paths: &Paths, index: &Index, report: &mut SyncRepo
 /// 사전 청크는 난이도표 태그를 함께 둬서 고르는 표를 바꿔 가며 다시 셀 수 있다.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PendingDownload {
-    /// 아직 없거나 바뀐 차트 청크
+    /// 아직 없거나 바뀐 차트 청크(난이도표와 무관하게 전부)
     pub chart_bytes: u64,
     pub chart_chunks: u32,
+    /// 차트 청크가 사전 청크와 같은 번호로 묶여 있어 고른 표에 따라 받을 차트 청크가 달라지는지.
+    /// 그러면 `charts`로 고른 표의 차트 용량을 센다.
+    pub charts_by_pre: bool,
+    /// 아직 없거나 바뀐 차트 청크별 크기와 태그(`charts_by_pre`일 때만)
+    pub charts: Vec<PendingChartChunk>,
     /// 아직 없거나 바뀐 사전 청크(난이도표와 무관하게 전부)
     pub pre: Vec<PendingPreChunk>,
 }
@@ -165,7 +229,27 @@ pub struct PendingPreChunk {
     pub tables: Vec<u32>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PendingChartChunk {
+    pub size: u64,
+    /// 같은 번호의 사전 청크에 곡이 있는 난이도표 id
+    pub tables: Vec<u32>,
+    /// 사용자가 직접 고른 표의 곡이 있어 고른 표와 무관하게 받는 청크
+    pub user: bool,
+}
+
 impl PendingDownload {
+    /// 고른 난이도표(None이면 전곡)로 동기화하면 받을 차트 청크의 (바이트, 개수).
+    pub fn chart_for(&self, selected: Option<&[u32]>) -> (u64, u32) {
+        let Some(sel) = selected.filter(|_| self.charts_by_pre) else {
+            return (self.chart_bytes, self.chart_chunks);
+        };
+        self.charts
+            .iter()
+            .filter(|c| c.user || c.tables.iter().any(|t| sel.contains(t)))
+            .fold((0, 0), |(bytes, n), c| (bytes + c.size, n + 1))
+    }
+
     /// 고른 난이도표(None이면 전곡)로 동기화하면 받을 사전 청크의 (바이트, 개수).
     pub fn pre_for(&self, selected: Option<&[u32]>) -> (u64, u32) {
         self.pre
@@ -179,17 +263,19 @@ impl PendingDownload {
 pub async fn pending_download(api: &Api, paths: &Paths, index: &Index) -> Result<PendingDownload> {
     let sizes = api.chunk_sizes().await?;
     let mut out = PendingDownload::default();
-    let local = index.chunk_hashes(ChunkKind::Chart)?;
-    for (id, c) in &sizes.chart {
-        if !(local.get(id) == Some(&c.sha256) && paths.chart_chunk(*id, &c.sha256).exists()) {
-            out.chart_bytes += c.size;
-            out.chart_chunks += 1;
-        }
-    }
     if sizes.asset.is_empty() {
+        count_charts(&sizes.chart, paths, index, &mut out, None)?;
         return Ok(out);
     }
-    let tags = api.pre_tables().await?.chunks;
+    let pre_tables = api.pre_tables().await?;
+    let tags = pre_tables.chunks;
+    if pre_tables.charts_by_pre {
+        out.charts_by_pre = true;
+        let user = user_table_chunks(api, index).await?;
+        count_charts(&sizes.chart, paths, index, &mut out, Some((&tags, &user)))?;
+    } else {
+        count_charts(&sizes.chart, paths, index, &mut out, None)?;
+    }
     let local = index.chunk_hashes(ChunkKind::Pre)?;
     for (id, c) in &sizes.asset {
         if local.get(id) == Some(&c.sha256) && paths.pre_chunk(*id, &c.sha256).exists() {
@@ -201,6 +287,38 @@ pub async fn pending_download(api: &Api, paths: &Paths, index: &Index) -> Result
         });
     }
     Ok(out)
+}
+
+/// (사전 청크 → 난이도표 태그, 사용자가 고른 표의 곡이 든 청크)
+type ChunkTags<'a> = (
+    &'a std::collections::BTreeMap<u32, Vec<u32>>,
+    &'a BTreeSet<u32>,
+);
+
+/// 아직 없거나 바뀐 차트 청크를 센다. `tags`가 있으면(사전 청크와 같은 번호) 청크별로도 적는다.
+fn count_charts(
+    sizes: &std::collections::BTreeMap<u32, crate::api::ChunkSize>,
+    paths: &Paths,
+    index: &Index,
+    out: &mut PendingDownload,
+    tags: Option<ChunkTags<'_>>,
+) -> Result<()> {
+    let local = index.chunk_hashes(ChunkKind::Chart)?;
+    for (id, c) in sizes {
+        if local.get(id) == Some(&c.sha256) && paths.chart_chunk(*id, &c.sha256).exists() {
+            continue;
+        }
+        out.chart_bytes += c.size;
+        out.chart_chunks += 1;
+        if let Some((tags, user)) = tags {
+            out.charts.push(PendingChartChunk {
+                size: c.size,
+                tables: tags.get(id).cloned().unwrap_or_default(),
+                user: user.contains(id),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// 청크 폴더에서 인덱스가 가리키지 않는 파일(교체·삭제된 옛 판)을 지운다.

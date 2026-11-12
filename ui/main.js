@@ -244,13 +244,18 @@ function renderServer(s) {
   return li;
 }
 
-/** 고른 난이도표(null이면 전곡)로 동기화하면 받을 { chart, pre, total } 바이트. 서버의 sync_pre와 같은 기준. */
+/** 고른 난이도표(null이면 전곡)로 동기화하면 받을 { chart, pre, total } 바이트. 클라이언트의 sync_charts·sync_pre와 같은 기준.
+ * 차트 청크는 서버가 사전 청크와 같은 번호로 묶었을 때(charts_by_pre)만 표에 따라 줄고, 사용자가 고른 표의 곡 청크(user)는 늘 받는다. */
 function pendingBytes(p, selected) {
   const pick = selected ? new Set(selected) : null;
   const pre = p.pre
     .filter((c) => !pick || c.tables.some((t) => pick.has(t)))
     .reduce((sum, c) => sum + c.size, 0);
-  return { chart: p.chart_bytes, pre, total: p.chart_bytes + pre };
+  const chart =
+    pick && p.charts_by_pre
+      ? p.charts.filter((c) => c.user || c.tables.some((t) => pick.has(t))).reduce((sum, c) => sum + c.size, 0)
+      : p.chart_bytes;
+  return { chart, pre, total: chart + pre };
 }
 
 function pendingText(p, selected) {
