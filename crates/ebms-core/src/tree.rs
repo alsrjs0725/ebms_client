@@ -166,8 +166,16 @@ pub struct Tree {
 
 impl Tree {
     /// 인덱스의 곡 목록으로 루트를 만든다. 곡 안 파일 목록은 처음 쓸 때 읽는다.
+    ///
+    /// 사전 다운로드할 난이도표를 골랐으면 사전 청크를 받은 곡과 사용자가 고른 표의 곡만 보인다.
+    /// 구동기가 곡 DB를 만들며 보이는 곡의 차트를 모두 읽어 해싱하므로, 쓰지 않을 곡은 빼서 그 시간을 줄인다.
     pub fn open(index: Arc<Index>) -> Result<Self> {
-        let folders = index.song_folders()?;
+        let mut folders = index.song_folders()?;
+        if index.pre_tables()?.is_some() {
+            let mut keep = index.pre_song_ids()?;
+            keep.extend(index.user_tables()?.into_iter().flat_map(|t| t.songs));
+            folders.retain(|(id, _)| keep.contains(id));
+        }
         Ok(Self::new(folders, index))
     }
 

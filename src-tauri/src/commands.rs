@@ -236,7 +236,7 @@ pub async fn add_user_table(state: State<'_, AppState>, url: String) -> CmdResul
 
 #[tauri::command]
 pub async fn remove_user_table(state: State<'_, AppState>, url: String) -> CmdResult<()> {
-    server(&state)?.remove_user_table(&url).map_err(err)
+    server(&state)?.remove_user_table(&url).await.map_err(err)
 }
 
 /// 고른 표를 모두 다시 읽는다. 읽지 못한 표의 오류 목록.

@@ -1485,20 +1485,38 @@ fn selected_difficulty_tables_sync_only_tagged_pre_chunks() {
     assert_eq!(index.pre_files(1).unwrap().len(), 2);
     assert!(index.pre_files(40).unwrap().is_empty());
 
-    // 빠진 곡의 사전 파일은 읽을 때 하나씩 받는다.
+    // 사전 청크를 받지 않은 곡은 구동기에 보이지 않는다(구동기가 차트를 해싱하지 않게).
+    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
+    assert!(fs.tree().resolve(SONG).is_some());
     index.set_pre_tables(Some(&[2])).unwrap();
     env.rt.block_on(env.client.sync()).unwrap();
-    let fs = env.client.fs(env.rt.handle().clone()).unwrap();
-    assert_eq!(
-        read_all(&fs, &format!("{SONG}/banner.png")).unwrap(),
-        env.want("banner.png")
-    );
-    assert_eq!(env.state.counters.pre_file.load(Ordering::SeqCst), 1);
+    fs.reload().unwrap();
+    assert!(fs.tree().resolve(SONG).is_none());
+    assert_eq!(env.state.counters.pre_file.load(Ordering::SeqCst), 0);
 
-    // 전곡으로 돌리면 모두 받는다.
+    // 사용자가 고른 표의 곡은 사전 청크가 없어도 보인다.
+    index
+        .set_user_tables(&[ebms_core::table::UserTable {
+            url: "https://t.example/u".into(),
+            name: "U".into(),
+            symbol: "u".into(),
+            charts: 1,
+            matched_charts: 1,
+            songs: vec![1],
+            bytes: 0,
+            checked_at: 0,
+        }])
+        .unwrap();
+    fs.reload().unwrap();
+    assert!(fs.tree().resolve(SONG).is_some());
+    index.set_user_tables(&[]).unwrap();
+
+    // 전곡으로 돌리면 모두 받고 모든 곡이 보인다.
     index.set_pre_tables(None).unwrap();
     let report = env.rt.block_on(env.client.sync()).unwrap();
     assert_eq!(report.pre_chunks_updated, vec![0]);
+    fs.reload().unwrap();
+    assert!(fs.tree().resolve(SONG).is_some());
     assert_eq!(env.state.counters.pre_chunk.load(Ordering::SeqCst), 4);
 }
 
@@ -1674,7 +1692,7 @@ fn user_table_downloads_matched_songs_and_pins_them() {
     rt.block_on(server.download_tables()).unwrap();
     assert_eq!(server.table_download().total, 0);
 
-    server.remove_user_table(&table.url).unwrap();
+    rt.block_on(server.remove_user_table(&table.url)).unwrap();
     assert!(server.user_tables().unwrap().is_empty());
     assert_eq!(
         rt.block_on(server.clear_cache()).unwrap(),
