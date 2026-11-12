@@ -160,6 +160,12 @@ impl ReadOnlyFs for Drive {
         fs.read(ino & INNER_MASK, offset, size, caller)
     }
 
+    fn opened(&self, ino: Ino, caller: &dyn Caller) {
+        if let Some((fs, _)) = self.member(ino) {
+            fs.opened(ino & INNER_MASK, caller);
+        }
+    }
+
     fn read_async(
         &self,
         ino: Ino,

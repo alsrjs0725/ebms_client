@@ -79,6 +79,9 @@ pub trait ReadOnlyFs: Send + Sync {
     /// 곡 전체 다운로드는 `caller`가 구동기일 때만 한다.
     fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>>;
 
+    /// 파일을 열었다. 읽기와 달리 OS 캐시를 거치지 않고 열 때마다 온다(Qwilight 미리듣기, [`crate::preview`]).
+    fn opened(&self, _ino: Ino, _caller: &dyn Caller) {}
+
     /// [`read`](Self::read)와 같지만 다운로드를 기다리지 않는다. 결과는 `done`으로 넘긴다.
     /// 캐시에 있으면 호출 스레드에서 바로, 다운로드가 필요하면 끝난 뒤 런타임 스레드에서 `done`을 부른다.
     /// FS 콜백 스레드가 네트워크를 기다려 드라이브 전체가 멈추지 않도록 백엔드는 이것을 쓴다.
@@ -175,6 +178,17 @@ impl ReadOnlyFs for EbmsFs {
             .is_some()
     }
 
+    fn opened(&self, ino: Ino, caller: &dyn Caller) {
+        let tree = self.tree();
+        // 실행 파일 확인(프로세스 열기)은 preview 음원일 때만 한다.
+        if tree.is_preview_audio(ino)
+            && let Some((song, _, _)) = tree.file(ino)
+            && caller.is_qwilight()
+        {
+            self.preview.opened(song.song_id, Instant::now());
+        }
+    }
+
     fn read(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Vec<u8>> {
         match self.plan(ino, offset, size, caller)? {
             Plan::Done(data) => Ok(data),
@@ -227,6 +241,7 @@ enum Plan {
 impl EbmsFs {
     /// 차트, 사전 청크, 개인 채보, 캐시에 있는 에셋은 바로 읽는다. 받아야 하면 [`Plan::Fetch`].
     /// Qwilight 미리듣기 로드가 읽는 플레이 파일은 받지 않고 [`Error::PreviewOnly`].
+    /// 게이트는 preview 음원을 열 때([`ReadOnlyFs::opened`]) 열고, 처음부터 읽을 때도 연다(open을 알리지 않는 백엔드).
     fn plan(&self, ino: Ino, offset: u64, size: u32, caller: &dyn Caller) -> Result<Plan> {
         let tree = self.tree();
         let Some((song, file_size, source)) = tree.file(ino) else {
@@ -269,7 +284,12 @@ impl EbmsFs {
                     .cache()
                     .get(song.song_id, &entry.path, entry.size)?
                 {
-                    Some(path) => read_at(&path, offset, len).map(Plan::Done),
+                    Some(path) => {
+                        if entry.kind == FileKind::Play && self.preview.previewing(song.song_id) {
+                            self.preview.touch(song.song_id, Instant::now());
+                        }
+                        read_at(&path, offset, len).map(Plan::Done)
+                    }
                     None if entry.kind == FileKind::Play
                         && self.preview.previewing(song.song_id)
                         && caller.is_qwilight()
