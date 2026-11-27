@@ -111,6 +111,22 @@ fn parallel_readdir_lists_every_entry() {
     .expect("mount");
     let dir = mountpoint.join("song");
 
+    // 수정 시각은 마운트 시각이 아니라 고정값이다. 바뀌면 구동기가 켤 때마다 곡을 다시 불러온다.
+    let fixed = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800);
+    let file = std::fs::read_dir(&dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    for p in [&dir, &file] {
+        assert_eq!(
+            std::fs::metadata(p).unwrap().modified().unwrap(),
+            fixed,
+            "{p:?}"
+        );
+    }
+
     let count = |d: &std::path::Path| std::fs::read_dir(d).unwrap().count();
     for _ in 0..3 {
         assert_eq!(count(&dir), FILES as usize, "sequential");
