@@ -92,6 +92,15 @@ impl ReadOnlyFs for MockFs {
     fn read(&self, _: Ino, _: u64, _: u32, _: &dyn Caller) -> Result<Vec<u8>> {
         Ok(Vec::new())
     }
+
+    fn modified(&self, ino: Ino) -> Option<std::time::SystemTime> {
+        (ino == ROOT).then(list_time)
+    }
+}
+
+/// 곡 목록이 마지막으로 바뀐 시각 (루트에만)
+fn list_time() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_790_000_000)
 }
 
 #[test]
@@ -112,6 +121,8 @@ fn parallel_readdir_lists_every_entry() {
     let dir = mountpoint.join("song");
 
     // 수정 시각은 마운트 시각이 아니라 고정값이다. 바뀌면 구동기가 켤 때마다 곡을 다시 불러온다.
+    let root_time = std::fs::metadata(&mountpoint).unwrap().modified().unwrap();
+    assert_eq!(root_time, list_time(), "root");
     let fixed = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_577_836_800);
     let file = std::fs::read_dir(&dir)
         .unwrap()
