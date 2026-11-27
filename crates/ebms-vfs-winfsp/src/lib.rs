@@ -49,6 +49,10 @@ const INFO_TIMEOUT_MS: u32 = 60_000;
 /// 다운로드를 기다리는 읽기가 끊기지 않도록 WinFsp가 허용하는 최대(10분).
 const IRP_TIMEOUT_MS: u32 = 600_000;
 const SECTOR: u64 = 4096;
+/// 파일·폴더에 보여주는 시각 (2020-01-01 00:00 UTC, FILETIME). 마운트할 때마다 바뀌면
+/// Qwilight·beatoraja가 곡이 바뀐 줄 알고 켤 때마다 다시 불러오므로 고정한다.
+/// 곡 목록을 담은 폴더만 [`ReadOnlyFs::modified`]로 목록이 바뀐 시각을 보여준다.
+const FILE_TIME: u64 = (1_577_836_800 + 11_644_473_600) * 10_000_000;
 /// 시스템·관리자는 모든 권한, 나머지는 읽기·실행만. 볼륨이 읽기 전용이라 쓰기는 어차피 막힌다.
 const SDDL: windows::core::PCWSTR = w!("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FRFX;;;WD)");
 
@@ -61,8 +65,6 @@ struct WinFs {
     rt: tokio::runtime::Handle,
     /// 모든 파일·폴더에 쓰는 보안 설명자
     security: Vec<u8>,
-    /// 마운트한 시각 (FILETIME). 파일 시각으로 보여준다.
-    time: u64,
     /// 언마운트할 때 true. 다운로드를 기다리는 읽기를 바로 끝낸다.
     cancel: watch::Receiver<bool>,
 }
@@ -95,10 +97,11 @@ impl WinFs {
         info.reparse_tag = 0;
         info.file_size = a.size;
         info.allocation_size = a.size.div_ceil(SECTOR) * SECTOR;
-        info.creation_time = self.time;
-        info.last_access_time = self.time;
-        info.last_write_time = self.time;
-        info.change_time = self.time;
+        let time = self.fs.modified(a.ino).map_or(FILE_TIME, filetime);
+        info.creation_time = FILE_TIME;
+        info.last_access_time = time;
+        info.last_write_time = time;
+        info.change_time = time;
         info.index_number = a.ino;
         info.hard_links = 0;
         info.ea_size = 0;
@@ -354,7 +357,6 @@ pub fn spawn_mount(
         open_log,
         rt,
         security: security_descriptor()?,
-        time: filetime_now(),
         cancel,
     };
     let mut host: FileSystemHost<WinFs, FineGuard> = FileSystemHost::new_async(params, context)?;
@@ -448,11 +450,9 @@ fn security_descriptor() -> std::io::Result<Vec<u8>> {
     }
 }
 
-/// 지금 시각을 FILETIME(1601년부터 100ns 단위)으로.
-fn filetime_now() -> u64 {
+/// 시각을 FILETIME(1601년부터 100ns 단위)으로.
+fn filetime(t: SystemTime) -> u64 {
     const UNIX_TO_1601_SECS: u64 = 11_644_473_600;
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    (now.as_secs() + UNIX_TO_1601_SECS) * 10_000_000 + u64::from(now.subsec_nanos() / 100)
+    let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
+    (d.as_secs() + UNIX_TO_1601_SECS) * 10_000_000 + u64::from(d.subsec_nanos() / 100)
 }

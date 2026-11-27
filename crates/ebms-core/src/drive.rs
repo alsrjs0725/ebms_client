@@ -160,6 +160,16 @@ impl ReadOnlyFs for Drive {
         fs.read(ino & INNER_MASK, offset, size, caller)
     }
 
+    /// 드라이브 루트는 서버 폴더와 같은 시각 (Qwilight에 드라이브 루트를 등록해도 새 곡을 알도록).
+    fn modified(&self, ino: Ino) -> Option<std::time::SystemTime> {
+        if ino == ROOT {
+            let s = self.state.read().unwrap_or_else(|e| e.into_inner());
+            return s.member.as_ref()?.fs.modified(ROOT);
+        }
+        let (fs, _) = self.member(ino)?;
+        fs.modified(ino & INNER_MASK)
+    }
+
     fn opened(&self, ino: Ino, caller: &dyn Caller) {
         if let Some((fs, _)) = self.member(ino) {
             fs.opened(ino & INNER_MASK, caller);

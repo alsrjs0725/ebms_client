@@ -82,6 +82,12 @@ pub trait ReadOnlyFs: Send + Sync {
     /// 파일을 열었다. 읽기와 달리 OS 캐시를 거치지 않고 열 때마다 온다(Qwilight 미리듣기, [`crate::preview`]).
     fn opened(&self, _ino: Ino, _caller: &dyn Caller) {}
 
+    /// 폴더·파일에 보여줄 수정 시각. None이면 백엔드가 정한 고정 시각을 쓴다.
+    /// 구동기는 등록한 폴더의 시각이 늦어졌을 때만 곡을 다시 찾으므로, 곡 목록이 바뀔 때만 바뀌어야 한다.
+    fn modified(&self, _ino: Ino) -> Option<std::time::SystemTime> {
+        None
+    }
+
     /// [`read`](Self::read)와 같지만 다운로드를 기다리지 않는다. 결과는 `done`으로 넘긴다.
     /// 캐시에 있으면 호출 스레드에서 바로, 다운로드가 필요하면 끝난 뒤 런타임 스레드에서 `done`을 부른다.
     /// FS 콜백 스레드가 네트워크를 기다려 드라이브 전체가 멈추지 않도록 백엔드는 이것을 쓴다.
@@ -176,6 +182,18 @@ impl ReadOnlyFs for EbmsFs {
                 })
             })
             .is_some()
+    }
+
+    /// 루트는 가장 최근에 받은 차트 청크의 시각. 동기화로 곡 목록이 바뀔 때만 늦어지고 다시 켜도 그대로다.
+    /// 폴더 자체의 시각은 옛 청크를 다음 실행 때 지우면서 한 번 더 바뀌므로 쓰지 않는다.
+    fn modified(&self, ino: Ino) -> Option<std::time::SystemTime> {
+        if ino != ROOT {
+            return None;
+        }
+        std::fs::read_dir(self.paths.charts())
+            .ok()?
+            .filter_map(|e| e.ok()?.metadata().ok()?.modified().ok())
+            .max()
     }
 
     fn opened(&self, ino: Ino, caller: &dyn Caller) {
