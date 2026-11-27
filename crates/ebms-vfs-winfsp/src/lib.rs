@@ -13,6 +13,7 @@ mod process;
 
 use std::ffi::c_void;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -74,6 +75,8 @@ struct Handle {
     pid: u32,
     /// 폴더 목록 (폴더를 처음 읽을 때 채운다)
     dir: DirBuffer,
+    /// `dir`을 한 번이라도 채웠는지
+    dir_filled: AtomicBool,
 }
 
 impl WinFs {
@@ -200,6 +203,7 @@ impl FileSystemContext for WinFs {
             kind: attr.kind,
             pid,
             dir: DirBuffer::new(),
+            dir_filled: AtomicBool::new(false),
         })
     }
 
@@ -233,8 +237,12 @@ impl FileSystemContext for WinFs {
             return Err(STATUS_NOT_A_DIRECTORY.into());
         }
         // 처음부터 읽을 때만 다시 채운다. 이어 읽기는 채워 둔 버퍼에서 marker 다음부터.
-        if marker.is_none() {
+        // WinFsp는 같은 폴더를 다른 핸들이 막 읽었으면 첫 페이지를 커널 캐시에서 주고 이어 읽기만
+        // 여기로 보낸다. 그 핸들의 버퍼는 비어 있어 나열이 첫 페이지에서 끝나므로, 채운 적이 없으면
+        // 이어 읽기라도 채운다 (Qwilight가 키음마다 같은 폴더를 동시에 검색할 때 키음이 빠졌다).
+        if marker.is_none() || !context.dir_filled.load(Ordering::Acquire) {
             self.fill_dir(context)?;
+            context.dir_filled.store(true, Ordering::Release);
         }
         Ok(context.dir.read(marker, buffer))
     }
